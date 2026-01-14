@@ -159,6 +159,7 @@ Or with full path if the command isn't in your PATH:
 | `list_projects` | List all Claude Code projects with session counts |
 | `list_sessions` | List sessions for a project with time filtering |
 | `get_session_logs` | Get full processed logs for a specific session |
+| `generate_html` | Generate interactive HTML from session logs and optionally open in browser |
 | `list_agents` | List available agent definitions (global + project) |
 | `get_agent_sessions` | Find sessions where a specific agent type was used |
 | `search_logs` | Search across sessions by content, tool, or role |
@@ -197,6 +198,39 @@ Get full conversation logs for a session.
   "session_id": "uuid-here",     // Required: session UUID
   "project": "myproject",        // Optional: helps locate session faster
   "include_sidechains": true     // Optional: include agent conversations
+}
+```
+
+#### generate_html
+
+Generate an interactive HTML file from session logs. Accepts either a `session_id` or a direct `file_path` to a JSONL file. If no output path is specified, creates a temporary file. By default, auto-opens in browser when no output path is given.
+
+```json
+{
+  "session_id": "uuid-here",       // Session UUID (use this OR file_path)
+  "file_path": "/path/to/log.jsonl", // Direct JSONL file path (use this OR session_id)
+  "project": "myproject",          // Optional: helps locate session faster (only with session_id)
+  "output_path": "/path/to.html",  // Optional: save to specific path (temp file if omitted)
+  "open_browser": true             // Optional: open in browser (auto-opens if no output_path)
+}
+```
+
+Examples:
+```json
+// Using session_id
+{ "session_id": "abc123-def456", "open_browser": true }
+
+// Using direct file path
+{ "file_path": "/path/to/session.jsonl", "open_browser": true }
+```
+
+Returns:
+```json
+{
+  "output_path": "/path/to/generated.html",
+  "session_id": "uuid-here",
+  "project": "myproject",
+  "opened_browser": true
 }
 ```
 

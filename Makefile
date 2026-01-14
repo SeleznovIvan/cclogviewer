@@ -1,7 +1,8 @@
 # Makefile for cclogviewer
 
-# Binary name
+# Binary names
 BINARY_NAME=cclogviewer
+MCP_BINARY_NAME=cclogviewer-mcp
 
 # Build directory
 BUILD_DIR=bin
@@ -39,9 +40,17 @@ $(BUILD_DIR):
 build: $(BUILD_DIR)
 	$(GOBUILD) -o $(BUILD_DIR)/$(BINARY_NAME) -v ./cmd/cclogviewer
 
+# Build the MCP server
+build-mcp: $(BUILD_DIR)
+	$(GOBUILD) -o $(BUILD_DIR)/$(MCP_BINARY_NAME) -v ./cmd/cclogviewer-mcp
+
+# Build all binaries
+build-all-binaries: build build-mcp
+
 # Build with version info
 build-release: $(BUILD_DIR)
 	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) -v ./cmd/cclogviewer
+	$(GOBUILD) $(LDFLAGS) -o $(BUILD_DIR)/$(MCP_BINARY_NAME) -v ./cmd/cclogviewer-mcp
 
 
 # Install the binary
@@ -52,10 +61,22 @@ install: build
 	@chmod 755 $(INSTALL_DIR)/$(BINARY_NAME)
 	@echo "Installation complete. You can now run '$(BINARY_NAME)' from anywhere."
 
+# Install the MCP server
+install-mcp: build-mcp
+	@echo "Installing $(MCP_BINARY_NAME) to $(INSTALL_DIR)"
+	@mkdir -p $(INSTALL_DIR)
+	@cp $(BUILD_DIR)/$(MCP_BINARY_NAME) $(INSTALL_DIR)/
+	@chmod 755 $(INSTALL_DIR)/$(MCP_BINARY_NAME)
+	@echo "Installation complete. You can now run '$(MCP_BINARY_NAME)' from anywhere."
+
+# Install all binaries
+install-all: install install-mcp
+
 # Uninstall the binary
 uninstall:
-	@echo "Removing $(BINARY_NAME) from $(INSTALL_DIR)"
+	@echo "Removing $(BINARY_NAME) and $(MCP_BINARY_NAME) from $(INSTALL_DIR)"
 	@rm -f $(INSTALL_DIR)/$(BINARY_NAME)
+	@rm -f $(INSTALL_DIR)/$(MCP_BINARY_NAME)
 	@echo "Uninstall complete."
 
 # Clean build artifacts
@@ -131,8 +152,12 @@ release: build-all
 help:
 	@echo "Available targets:"
 	@echo "  make build          - Build the binary"
+	@echo "  make build-mcp      - Build the MCP server"
+	@echo "  make build-all-binaries - Build all binaries"
 	@echo "  make install        - Install binary to Go bin directory ($(INSTALL_DIR))"
-	@echo "  make uninstall      - Remove binary from Go bin directory"
+	@echo "  make install-mcp    - Install MCP server to Go bin directory"
+	@echo "  make install-all    - Install all binaries"
+	@echo "  make uninstall      - Remove binaries from Go bin directory"
 	@echo "  make clean          - Clean build artifacts"
 	@echo "  make deps           - Download and tidy dependencies"
 	@echo "  make fmt            - Format Go code"
@@ -149,4 +174,4 @@ help:
 	@echo "  - GOBIN if set, otherwise"
 	@echo "  - GOPATH/bin (currently: $(INSTALL_DIR))"
 
-.PHONY: build build-release install uninstall clean deps fmt lint test test-coverage test-coverage-report test-integration benchmark test-all build-all build-linux build-darwin build-windows release help
+.PHONY: build build-mcp build-all-binaries build-release install install-mcp install-all uninstall clean deps fmt lint test test-coverage test-coverage-report test-integration benchmark test-all build-all build-linux build-darwin build-windows release help
