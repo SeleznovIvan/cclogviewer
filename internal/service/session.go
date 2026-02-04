@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -312,8 +313,20 @@ func (s *SessionService) FindSessionsByAgentType(agentType, projectName string, 
 
 	var results []AgentUsageInfo
 
+	// When searching across multiple projects, limit sessions per project to avoid
+	// excessive file parsing. Use a reasonable limit that balances coverage vs performance.
+	perProjectLimit := 0 // 0 means no limit for single project searches
+	if len(projectsToSearch) > 1 {
+		// Limit sessions per project when searching across all projects
+		perProjectLimit = 50
+		if limit > 0 && limit < 50 {
+			// If user wants fewer results, we can check fewer sessions per project
+			perProjectLimit = limit * 5
+		}
+	}
+
 	for _, project := range projectsToSearch {
-		sessions, err := s.ListSessions(project.Name, days, true, 0)
+		sessions, err := s.ListSessions(project.Name, days, true, perProjectLimit)
 		if err != nil {
 			continue
 		}
@@ -531,4 +544,725 @@ func extractAgentTypes(entries []models.LogEntry) []string {
 	sort.Strings(result)
 
 	return result
+}
+
+// GetSessionSummary returns a lightweight summary of a session.
+func (s *SessionService) GetSessionSummary(sessionID, agentID, projectName string, includeSidechains bool) (*models.SessionSummary, error) {
+	processed, project, err := s.loadProcessedEntries(sessionID, agentID, projectName, includeSidechains)
+	if err != nil {
+		return nil, err
+	}
+	if processed == nil {
+		return nil, nil
+	}
+
+	return s.computeSummary(sessionID, agentID, project, processed), nil
+}
+
+// GetToolUsageStats returns tool usage statistics for a session.
+func (s *SessionService) GetToolUsageStats(sessionID, agentID, projectName string, includeSidechains bool) (*models.ToolUsageStats, error) {
+	processed, _, err := s.loadProcessedEntries(sessionID, agentID, projectName, includeSidechains)
+	if err != nil {
+		return nil, err
+	}
+	if processed == nil {
+		return nil, nil
+	}
+
+	return s.computeToolStats(sessionID, agentID, processed), nil
+}
+
+// GetSessionErrors returns errors found in a session.
+func (s *SessionService) GetSessionErrors(sessionID, agentID, projectName string, includeSidechains bool, limit int) (*models.SessionErrors, error) {
+	processed, _, err := s.loadProcessedEntries(sessionID, agentID, projectName, includeSidechains)
+	if err != nil {
+		return nil, err
+	}
+	if processed == nil {
+		return nil, nil
+	}
+
+	return s.computeErrors(sessionID, agentID, processed, limit), nil
+}
+
+// GetSessionTimeline returns a condensed timeline of session events.
+func (s *SessionService) GetSessionTimeline(sessionID, agentID, projectName string, includeSidechains bool, limit int) (*models.SessionTimeline, error) {
+	processed, _, err := s.loadProcessedEntries(sessionID, agentID, projectName, includeSidechains)
+	if err != nil {
+		return nil, err
+	}
+	if processed == nil {
+		return nil, nil
+	}
+
+	return s.computeTimeline(sessionID, agentID, processed, limit), nil
+}
+
+// GetSessionStats returns aggregated session statistics.
+func (s *SessionService) GetSessionStats(sessionID, agentID, projectName string, includeSidechains bool, errorsLimit int) (*models.SessionStats, error) {
+	processed, project, err := s.loadProcessedEntries(sessionID, agentID, projectName, includeSidechains)
+	if err != nil {
+		return nil, err
+	}
+	if processed == nil {
+		return nil, nil
+	}
+
+	stats := &models.SessionStats{
+		SessionID:   sessionID,
+		Project:     project,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if agentID != "" {
+		stats.AgentID = &agentID
+	}
+
+	stats.Summary = s.computeSummary(sessionID, agentID, project, processed)
+	stats.ToolStats = s.computeToolStats(sessionID, agentID, processed)
+	stats.Errors = s.computeErrors(sessionID, agentID, processed, errorsLimit)
+
+	return stats, nil
+}
+
+// loadProcessedEntries loads and processes entries for a session or specific agent.
+func (s *SessionService) loadProcessedEntries(sessionID, agentID, projectName string, includeSidechains bool) ([]*models.ProcessedEntry, string, error) {
+	// If agentID is specified, load that specific agent file
+	if agentID != "" {
+		return s.loadAgentEntries(sessionID, agentID, projectName)
+	}
+
+	// Otherwise load the main session
+	filePath, project, err := s.findSessionFile(sessionID, projectName)
+	if err != nil {
+		return nil, "", err
+	}
+	if filePath == "" {
+		return nil, "", nil
+	}
+
+	entries, err := parser.ReadJSONLFile(filePath)
+	if err != nil {
+		return nil, "", err
+	}
+
+	processed := processor.ProcessEntries(entries)
+
+	// Filter sidechains if not included
+	if !includeSidechains {
+		var filtered []*models.ProcessedEntry
+		for _, e := range processed {
+			if !e.IsSidechain {
+				filtered = append(filtered, e)
+			}
+		}
+		processed = filtered
+	}
+
+	return processed, project, nil
+}
+
+// loadAgentEntries loads entries for a specific agent by ID.
+func (s *SessionService) loadAgentEntries(sessionID, agentID, projectName string) ([]*models.ProcessedEntry, string, error) {
+	// Find the project
+	project, err := s.projectService.FindProjectByName(projectName)
+	if err != nil {
+		return nil, "", err
+	}
+
+	projectDir := ""
+	projectNameResult := ""
+
+	if project != nil {
+		projectDir = s.projectService.GetProjectDir(project.EncodedPath)
+		projectNameResult = project.Name
+	} else {
+		// Search all projects if no specific project
+		projects, err := s.projectService.ListProjects("")
+		if err != nil {
+			return nil, "", err
+		}
+
+		for _, p := range projects {
+			dir := s.projectService.GetProjectDir(p.EncodedPath)
+			if s.findAgentFile(dir, sessionID, agentID) != "" {
+				projectDir = dir
+				projectNameResult = p.Name
+				break
+			}
+		}
+	}
+
+	if projectDir == "" {
+		return nil, "", nil
+	}
+
+	agentFile := s.findAgentFile(projectDir, sessionID, agentID)
+	if agentFile == "" {
+		return nil, "", nil
+	}
+
+	entries, err := readSingleJSONLFileForService(agentFile)
+	if err != nil {
+		return nil, "", err
+	}
+
+	processed := processor.ProcessEntries(entries)
+	return processed, projectNameResult, nil
+}
+
+// findAgentFile finds an agent file by ID in the project directory.
+func (s *SessionService) findAgentFile(projectDir, sessionID, agentID string) string {
+	// Try direct agent file: {project}/agent-{id}.jsonl
+	directPath := filepath.Join(projectDir, fmt.Sprintf("agent-%s.jsonl", agentID))
+	if _, err := os.Stat(directPath); err == nil {
+		return directPath
+	}
+
+	// Try subagents directory: {project}/{session_id}/subagents/agent-{id}.jsonl
+	if sessionID != "" {
+		subagentPath := filepath.Join(projectDir, sessionID, "subagents", fmt.Sprintf("agent-%s.jsonl", agentID))
+		if _, err := os.Stat(subagentPath); err == nil {
+			return subagentPath
+		}
+	}
+
+	// Search all session directories for the agent file
+	entries, err := os.ReadDir(projectDir)
+	if err != nil {
+		return ""
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		subagentPath := filepath.Join(projectDir, entry.Name(), "subagents", fmt.Sprintf("agent-%s.jsonl", agentID))
+		if _, err := os.Stat(subagentPath); err == nil {
+			return subagentPath
+		}
+	}
+
+	return ""
+}
+
+// readSingleJSONLFileForService reads a single JSONL file without loading subagents.
+func readSingleJSONLFileForService(filename string) ([]models.LogEntry, error) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var entries []models.LogEntry
+	scanner := bufio.NewScanner(file)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 1024*1024*10) // 10MB max
+
+	for scanner.Scan() {
+		var entry models.LogEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+		if entry.Type == "summary" {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+
+	return entries, scanner.Err()
+}
+
+// computeSummary computes a summary from processed entries.
+func (s *SessionService) computeSummary(sessionID, agentID, project string, entries []*models.ProcessedEntry) *models.SessionSummary {
+	summary := &models.SessionSummary{
+		SessionID: sessionID,
+		Project:   project,
+	}
+
+	if agentID != "" {
+		summary.AgentID = &agentID
+	}
+
+	var (
+		totalInput, totalOutput, cacheRead, cacheCreation int
+		totalToolCalls, successCalls, failedCalls         int
+		userMessages, assistantMessages                   int
+		errorCount                                        int
+		toolNames                                         = make(map[string]bool)
+		agentTypes                                        = make(map[string]bool)
+		minTime, maxTime                                  time.Time
+	)
+
+	for _, e := range entries {
+		// Count messages
+		if e.Role == "user" {
+			userMessages++
+		} else if e.Role == "assistant" {
+			assistantMessages++
+		}
+
+		// Count tokens
+		totalInput += e.InputTokens
+		totalOutput += e.OutputTokens
+		cacheRead += e.CacheReadTokens
+		cacheCreation += e.CacheCreationTokens
+
+		// Count tool calls
+		for _, tc := range e.ToolCalls {
+			totalToolCalls++
+			toolNames[tc.Name] = true
+			if tc.Result != nil && tc.Result.IsError {
+				failedCalls++
+			} else {
+				successCalls++
+			}
+		}
+
+		// Count errors
+		if e.IsError {
+			errorCount++
+		}
+
+		// Track sidechains/agent types
+		if e.IsSidechain && e.AgentID != "" {
+			agentTypes[e.AgentID] = true
+		}
+
+		// Track timestamps for duration (use RawTimestamp which is RFC3339 format)
+		if e.RawTimestamp != "" {
+			if t, err := time.Parse(time.RFC3339, e.RawTimestamp); err == nil {
+				if minTime.IsZero() || t.Before(minTime) {
+					minTime = t
+				}
+				if maxTime.IsZero() || t.After(maxTime) {
+					maxTime = t
+				}
+			}
+		}
+	}
+
+	summary.MessageCount = len(entries)
+	summary.UserMessages = userMessages
+	summary.AssistantMsgs = assistantMessages
+
+	if !minTime.IsZero() {
+		summary.Date = minTime.Format("2006-01-02")
+		summary.DurationMinutes = int(maxTime.Sub(minTime).Minutes())
+	}
+
+	summary.Tokens = &models.TokenStats{
+		TotalInput:    totalInput,
+		TotalOutput:   totalOutput,
+		CacheRead:     cacheRead,
+		CacheCreation: cacheCreation,
+	}
+
+	summary.ToolCalls = &models.ToolCallStats{
+		Total:       totalToolCalls,
+		UniqueTools: len(toolNames),
+		Success:     successCalls,
+		Failed:      failedCalls,
+	}
+
+	agentList := make([]string, 0, len(agentTypes))
+	for a := range agentTypes {
+		agentList = append(agentList, a)
+	}
+	sort.Strings(agentList)
+
+	summary.Sidechains = &models.SidechainStats{
+		Count:      len(agentTypes),
+		AgentTypes: agentList,
+	}
+
+	summary.HasErrors = errorCount > 0
+	summary.ErrorCount = errorCount
+
+	return summary
+}
+
+// computeToolStats computes tool usage statistics from processed entries.
+func (s *SessionService) computeToolStats(sessionID, agentID string, entries []*models.ProcessedEntry) *models.ToolUsageStats {
+	stats := &models.ToolUsageStats{
+		SessionID: sessionID,
+	}
+
+	if agentID != "" {
+		stats.AgentID = &agentID
+	}
+
+	toolCounts := make(map[string]*models.ToolUsageStat)
+	var toolSequence []models.ToolSequenceEntry
+	var firstTool, lastTool string
+	maxCount := 0
+	maxFailed := 0
+	mostUsed := ""
+	mostFailed := ""
+
+	for _, e := range entries {
+		for _, tc := range e.ToolCalls {
+			toolSequence = append(toolSequence, models.ToolSequenceEntry{
+				Name:      tc.Name,
+				ToolUseID: tc.ID,
+			})
+
+			if firstTool == "" {
+				firstTool = tc.Name
+			}
+			lastTool = tc.Name
+
+			if _, exists := toolCounts[tc.Name]; !exists {
+				toolCounts[tc.Name] = &models.ToolUsageStat{Name: tc.Name}
+			}
+
+			toolCounts[tc.Name].Count++
+
+			// Check if tool call failed
+			if tc.Result != nil && tc.Result.IsError {
+				toolCounts[tc.Name].Failed++
+			} else {
+				toolCounts[tc.Name].Success++
+			}
+
+			// Track patterns
+			if toolCounts[tc.Name].Count > maxCount {
+				maxCount = toolCounts[tc.Name].Count
+				mostUsed = tc.Name
+			}
+			if toolCounts[tc.Name].Failed > maxFailed {
+				maxFailed = toolCounts[tc.Name].Failed
+				mostFailed = tc.Name
+			}
+		}
+	}
+
+	// Convert map to sorted slice
+	tools := make([]models.ToolUsageStat, 0, len(toolCounts))
+	for _, t := range toolCounts {
+		tools = append(tools, *t)
+	}
+	sort.Slice(tools, func(i, j int) bool {
+		return tools[i].Count > tools[j].Count
+	})
+
+	stats.Tools = tools
+	stats.ToolSequence = toolSequence
+	stats.Patterns = &models.ToolPatterns{
+		MostUsed:   mostUsed,
+		MostFailed: mostFailed,
+		FirstTool:  firstTool,
+		LastTool:   lastTool,
+	}
+
+	return stats
+}
+
+// computeErrors extracts errors from processed entries.
+func (s *SessionService) computeErrors(sessionID, agentID string, entries []*models.ProcessedEntry, limit int) *models.SessionErrors {
+	result := &models.SessionErrors{
+		SessionID:  sessionID,
+		Categories: &models.ErrorCategories{},
+	}
+
+	if agentID != "" {
+		result.AgentID = &agentID
+	}
+
+	var errors []models.SessionError
+
+	// Collect all errors with their entry indices and UUIDs
+	for i, e := range entries {
+		// Check if entry itself is an error
+		if e.IsError {
+			result.Categories.ToolError++
+
+			err := models.SessionError{
+				UUID:       e.UUID,
+				Timestamp:  e.Timestamp,
+				Type:       "tool_error",
+				Message:    truncateString(e.Content, 500),
+				EntryIndex: i,
+			}
+
+			if e.IsSidechain && e.AgentID != "" {
+				err.Sidechain = e.AgentID
+			}
+
+			errors = append(errors, err)
+		}
+
+		// Check tool call results for errors
+		for _, tc := range e.ToolCalls {
+			if tc.Result != nil && tc.Result.IsError {
+				result.Categories.ToolError++
+
+				err := models.SessionError{
+					UUID:       e.UUID, // Use parent entry's UUID
+					Timestamp:  tc.Result.Timestamp,
+					Type:       "tool_error",
+					ToolName:   tc.Name,
+					Message:    truncateString(tc.Result.Content, 500),
+					EntryIndex: i,
+				}
+
+				if e.IsSidechain && e.AgentID != "" {
+					err.Sidechain = e.AgentID
+				}
+
+				errors = append(errors, err)
+			}
+		}
+
+		// Look for console errors in content (browser_console_messages results)
+		if strings.Contains(strings.ToLower(e.Content), "error") && strings.Contains(e.Content, "console") {
+			result.Categories.ConsoleError++
+		}
+	}
+
+	result.TotalErrors = len(errors)
+
+	// Apply limit
+	if limit > 0 && len(errors) > limit {
+		errors = errors[:limit]
+	}
+
+	result.Errors = errors
+
+	return result
+}
+
+// getErrorContextLogs returns context logs surrounding an error at the given entry index.
+func (s *SessionService) getErrorContextLogs(entries []*models.ProcessedEntry, errorIndex int, contextSize int) []models.ContextLog {
+	var contextLogs []models.ContextLog
+
+	// Get entries before the error
+	for offset := -contextSize; offset < 0; offset++ {
+		idx := errorIndex + offset
+		if idx < 0 {
+			continue
+		}
+		contextLogs = append(contextLogs, s.entryToContextLog(entries[idx], offset))
+	}
+
+	// Get entries after the error
+	for offset := 1; offset <= contextSize; offset++ {
+		idx := errorIndex + offset
+		if idx >= len(entries) {
+			break
+		}
+		contextLogs = append(contextLogs, s.entryToContextLog(entries[idx], offset))
+	}
+
+	return contextLogs
+}
+
+// entryToContextLog converts a ProcessedEntry to a ContextLog.
+func (s *SessionService) entryToContextLog(e *models.ProcessedEntry, offset int) models.ContextLog {
+	log := models.ContextLog{
+		Offset:       offset,
+		Timestamp:    e.Timestamp,
+		Role:         e.Role,
+		Content:      truncateString(e.Content, 5000), // Larger limit for debugging context
+		IsToolResult: e.IsToolResult,
+		IsError:      e.IsError,
+	}
+
+	// If entry has tool calls, include tool details
+	if len(e.ToolCalls) > 0 {
+		tc := e.ToolCalls[0]
+		log.ToolName = tc.Name
+		log.ToolUseID = tc.ID
+		log.ToolInput = tc.RawInput
+
+		// Include tool result content if available
+		if tc.Result != nil {
+			log.ToolOutput = truncateString(tc.Result.Content, 5000)
+		}
+
+		// If there are multiple tool calls, indicate that
+		if len(e.ToolCalls) > 1 {
+			log.ToolName = fmt.Sprintf("%s (+%d more)", tc.Name, len(e.ToolCalls)-1)
+		}
+	}
+
+	return log
+}
+
+// computeTimeline creates a condensed timeline from processed entries.
+func (s *SessionService) computeTimeline(sessionID, agentID string, entries []*models.ProcessedEntry, limit int) *models.SessionTimeline {
+	timeline := &models.SessionTimeline{
+		SessionID:    sessionID,
+		TotalEntries: len(entries),
+	}
+
+	if agentID != "" {
+		timeline.AgentID = &agentID
+	}
+
+	var items []models.TimelineEntry
+	step := 0
+
+	for _, e := range entries {
+		step++
+
+		// For tool calls, create separate timeline entries
+		if len(e.ToolCalls) > 0 {
+			for _, tc := range e.ToolCalls {
+				item := models.TimelineEntry{
+					Step:      step,
+					Timestamp: e.Timestamp,
+					Role:      e.Role,
+					Type:      "tool_call",
+					Tool:      tc.Name,
+					ToolUseID: tc.ID,
+					Summary:   truncateString(extractToolSummary(tc), 150),
+					Tokens:    e.OutputTokens,
+				}
+
+				if tc.Result != nil {
+					if tc.Result.IsError {
+						item.Status = "failed"
+					} else {
+						item.Status = "success"
+					}
+				}
+
+				if e.IsSidechain && e.AgentID != "" {
+					item.Sidechain = e.AgentID
+				}
+
+				items = append(items, item)
+				step++
+			}
+		} else {
+			// Regular message
+			item := models.TimelineEntry{
+				Step:      step,
+				Timestamp: e.Timestamp,
+				Role:      e.Role,
+				Type:      "message",
+				Summary:   truncateString(e.Content, 150),
+				Tokens:    e.OutputTokens,
+			}
+
+			if e.IsSidechain && e.AgentID != "" {
+				item.Sidechain = e.AgentID
+			}
+
+			items = append(items, item)
+		}
+
+		// Apply limit during iteration
+		if limit > 0 && len(items) >= limit {
+			break
+		}
+	}
+
+	// Final limit enforcement
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+
+	timeline.ReturnedEntries = len(items)
+	timeline.Timeline = items
+
+	return timeline
+}
+
+// truncateString truncates a string to the specified length.
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// extractToolSummary extracts a summary from a tool call.
+func extractToolSummary(tc models.ToolCall) string {
+	// Try to get a meaningful summary from the raw input
+	if tc.RawInput != nil {
+		switch input := tc.RawInput.(type) {
+		case map[string]interface{}:
+			// Common fields to extract
+			for _, key := range []string{"command", "query", "url", "file_path", "pattern", "prompt"} {
+				if val, ok := input[key]; ok {
+					if str, ok := val.(string); ok {
+						return str
+					}
+				}
+			}
+		case string:
+			return input
+		}
+	}
+
+	return tc.Name
+}
+
+// GetLogsAroundEntry retrieves logs surrounding a specific entry identified by UUID.
+// offset controls direction: negative = entries before target, positive = entries after target.
+// Examples: offset=-3 gets 3 entries before + target, offset=+3 gets target + 3 entries after.
+func (s *SessionService) GetLogsAroundEntry(sessionID, targetUUID, projectName string, offset int, includeSidechains bool) (*models.LogsAroundEntry, error) {
+	processed, project, err := s.loadProcessedEntries(sessionID, "", projectName, includeSidechains)
+	if err != nil {
+		return nil, err
+	}
+	if processed == nil {
+		return nil, nil
+	}
+
+	// Find the target entry by UUID
+	targetIndex := -1
+	for i, e := range processed {
+		if e.UUID == targetUUID {
+			targetIndex = i
+			break
+		}
+	}
+
+	if targetIndex == -1 {
+		return nil, fmt.Errorf("entry with UUID %s not found", targetUUID)
+	}
+
+	// Default offset to -3 (before) if not specified
+	if offset == 0 {
+		offset = -3
+	}
+
+	result := &models.LogsAroundEntry{
+		SessionID:   sessionID,
+		Project:     project,
+		TargetUUID:  targetUUID,
+		TargetIndex: targetIndex,
+		Offset:      offset,
+		TotalCount:  len(processed),
+	}
+
+	if offset < 0 {
+		// Negative offset: get entries BEFORE the target
+		absOffset := -offset
+		for i := -absOffset; i < 0; i++ {
+			idx := targetIndex + i
+			if idx < 0 {
+				continue
+			}
+			result.Entries = append(result.Entries, s.entryToContextLog(processed[idx], i))
+		}
+		// Include the target entry itself at offset 0
+		result.Entries = append(result.Entries, s.entryToContextLog(processed[targetIndex], 0))
+	} else {
+		// Positive offset: get entries AFTER the target
+		// Include the target entry itself at offset 0
+		result.Entries = append(result.Entries, s.entryToContextLog(processed[targetIndex], 0))
+		for i := 1; i <= offset; i++ {
+			idx := targetIndex + i
+			if idx >= len(processed) {
+				break
+			}
+			result.Entries = append(result.Entries, s.entryToContextLog(processed[idx], i))
+		}
+	}
+
+	return result, nil
 }

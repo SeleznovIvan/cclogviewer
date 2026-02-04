@@ -154,15 +154,30 @@ Or with full path if the command isn't in your PATH:
 
 ### Available Tools
 
+#### Discovery & Navigation
 | Tool | Description |
 |------|-------------|
 | `list_projects` | List all Claude Code projects with session counts |
 | `list_sessions` | List sessions for a project with time filtering |
-| `get_session_logs` | Get full processed logs for a specific session |
-| `generate_html` | Generate interactive HTML from session logs and optionally open in browser |
 | `list_agents` | List available agent definitions (global + project) |
 | `get_agent_sessions` | Find sessions where a specific agent type was used |
 | `search_logs` | Search across sessions by content, tool, or role |
+
+#### Session Analysis
+| Tool | Description |
+|------|-------------|
+| `get_session_logs` | Get full processed logs for a specific session |
+| `get_session_summary` | Lightweight overview: message counts, tokens, tool stats |
+| `get_tool_usage_stats` | Detailed tool usage patterns and sequences |
+| `get_session_errors` | Extract errors and blockers for debugging |
+| `get_session_timeline` | Condensed step-by-step progression |
+| `get_session_stats` | Combined stats (summary + tools + errors) |
+
+#### Debugging
+| Tool | Description |
+|------|-------------|
+| `get_logs_around_entry` | Get context around a specific entry by UUID |
+| `generate_html` | Generate interactive HTML from session logs |
 
 ### Tool Details
 
@@ -271,6 +286,157 @@ Search across sessions by various criteria.
   "days": 7,                     // Optional: only last N days
   "include_sidechains": true,    // Optional: search agent conversations
   "limit": 50                    // Optional: max results
+}
+```
+
+---
+
+### Session Analysis Tools
+
+#### get_session_summary
+
+Get a lightweight overview of a session without full logs.
+
+```json
+{
+  "session_id": "uuid-here",     // Required: session UUID
+  "project": "myproject",        // Optional: helps locate session faster
+  "agent_id": "a909e0c",         // Optional: analyze specific subagent
+  "include_sidechains": true     // Optional: include agent conversations
+}
+```
+
+Returns message counts, token usage, tool statistics, and error counts.
+
+#### get_tool_usage_stats
+
+Get detailed tool usage patterns for a session.
+
+```json
+{
+  "session_id": "uuid-here",     // Required: session UUID
+  "project": "myproject",        // Optional
+  "agent_id": "a909e0c",         // Optional: specific subagent
+  "include_sidechains": true     // Optional
+}
+```
+
+Returns per-tool counts, success/failure rates, tool sequence, and patterns (most used, most failed, first/last tool).
+
+#### get_session_errors
+
+Extract errors and blockers from a session for debugging.
+
+```json
+{
+  "session_id": "uuid-here",     // Required: session UUID
+  "project": "myproject",        // Optional
+  "limit": 20,                   // Optional: max errors to return
+  "include_sidechains": true     // Optional
+}
+```
+
+Returns:
+```json
+{
+  "session_id": "uuid-here",
+  "total_errors": 15,
+  "errors": [
+    {
+      "uuid": "error-uuid",      // Use with get_logs_around_entry
+      "timestamp": "12:38:40",
+      "type": "tool_error",
+      "tool_name": "Bash",
+      "message": "Exit code 1\ncommand not found",
+      "entry_index": 24
+    }
+  ],
+  "categories": {
+    "tool_error": 10,
+    "console_error": 5,
+    "validation_error": 0
+  }
+}
+```
+
+#### get_session_timeline
+
+Get a condensed timeline showing step-by-step progression.
+
+```json
+{
+  "session_id": "uuid-here",     // Required: session UUID
+  "project": "myproject",        // Optional
+  "limit": 100,                  // Optional: max entries
+  "include_sidechains": true     // Optional
+}
+```
+
+Returns a simplified view of each step with timestamps, roles, tools used, and status indicators.
+
+#### get_session_stats
+
+Get comprehensive statistics combining summary, tool usage, and errors.
+
+```json
+{
+  "session_id": "uuid-here",     // Required: session UUID
+  "project": "myproject",        // Optional
+  "generate_html": true,         // Optional: also generate HTML visualization
+  "open_browser": true,          // Optional: open HTML in browser
+  "errors_limit": 10,            // Optional: max errors to include
+  "include_sidechains": true     // Optional
+}
+```
+
+---
+
+### Debugging Tools
+
+#### get_logs_around_entry
+
+Get context around a specific log entry identified by UUID. Use this after `get_session_errors` to investigate what led to an error or what happened after.
+
+```json
+{
+  "session_id": "uuid-here",     // Required: session UUID
+  "uuid": "entry-uuid",          // Required: target entry UUID (from get_session_errors)
+  "project": "myproject",        // Optional
+  "offset": -3,                  // Direction: negative=BEFORE, positive=AFTER
+  "include_sidechains": true     // Optional
+}
+```
+
+**Offset parameter:**
+- `offset: -3` → Get 3 entries BEFORE the target + target itself
+- `offset: 3` → Get target + 3 entries AFTER
+
+**Example workflow:**
+```
+1. get_session_errors → find error with uuid "abc123"
+2. get_logs_around_entry(uuid: "abc123", offset: -3) → see what caused the error
+3. get_logs_around_entry(uuid: "abc123", offset: 3) → see the fix attempt
+```
+
+Returns full context including tool inputs/outputs:
+```json
+{
+  "entries": [
+    {
+      "offset": -1,
+      "timestamp": "13:06:07",
+      "role": "assistant",
+      "tool_name": "Bash",
+      "tool_input": {"command": "make install"},
+      "tool_output": "Exit code 1\ncommand not found"
+    },
+    {
+      "offset": 0,
+      "timestamp": "13:06:15",
+      "content": "Error: make not found",
+      "is_error": true
+    }
+  ]
 }
 ```
 

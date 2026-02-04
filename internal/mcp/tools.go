@@ -3,32 +3,53 @@ package mcp
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
+	"github.com/brads3290/cclogviewer/internal/browser"
 	"github.com/brads3290/cclogviewer/internal/models"
 	"github.com/brads3290/cclogviewer/internal/service"
 )
 
-// Services holds all service dependencies for tools.
-type Services struct {
-	Project *service.ProjectService
-	Session *service.SessionService
-	Agent   *service.AgentService
-	Search  *service.SearchService
+// SaveResult represents the result of saving data to a file.
+type SaveResult struct {
+	FilePath string      `json:"file_path"`
+	Data     interface{} `json:"data"`
 }
 
-// NewServices creates a new Services instance.
-func NewServices(claudeDir string) *Services {
-	projectService := service.NewProjectService(claudeDir)
-	sessionService := service.NewSessionService(projectService)
-	agentService := service.NewAgentService(projectService)
-	searchService := service.NewSearchService(projectService, sessionService)
-
-	return &Services{
-		Project: projectService,
-		Session: sessionService,
-		Agent:   agentService,
-		Search:  searchService,
+// saveToFile saves data as JSON to the specified path, creating directories if needed.
+func saveToFile(data interface{}, outputPath string) (*SaveResult, error) {
+	// Create parent directories if they don't exist
+	dir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
+
+	// Marshal data to JSON
+	jsonData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal data: %w", err)
+	}
+
+	// Write to file
+	if err := os.WriteFile(outputPath, jsonData, 0644); err != nil {
+		return nil, fmt.Errorf("failed to write file: %w", err)
+	}
+
+	return &SaveResult{
+		FilePath: outputPath,
+		Data:     data,
+	}, nil
+}
+
+// Services is an alias for service.Services for backward compatibility.
+type Services = service.Services
+
+// NewServices creates a new Services instance.
+// This is a convenience wrapper for service.NewServices.
+func NewServices(claudeDir string) *Services {
+	return service.NewServices(claudeDir)
 }
 
 // ListProjectsTool implements the list_projects tool.
@@ -190,6 +211,10 @@ func (t *GetSessionLogsTool) InputSchema() json.RawMessage {
 				"type": "boolean",
 				"description": "Include sidechain (agent) conversations",
 				"default": true
+			},
+			"output_path": {
+				"type": "string",
+				"description": "File path to save the logs as JSON. If provided, creates parent directories automatically."
 			}
 		},
 		"required": ["session_id"]
@@ -216,6 +241,12 @@ func (t *GetSessionLogsTool) Execute(args map[string]interface{}) (interface{}, 
 
 	if logs == nil {
 		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// Save to file if output_path is provided
+	outputPath := getString(args, "output_path")
+	if outputPath != "" {
+		return saveToFile(logs, outputPath)
 	}
 
 	return logs, nil
@@ -514,6 +545,717 @@ func (t *GenerateHTMLTool) Execute(args map[string]interface{}) (interface{}, er
 	return result, nil
 }
 
+// GetSessionSummaryTool implements the get_session_summary tool.
+type GetSessionSummaryTool struct {
+	services *Services
+}
+
+func NewGetSessionSummaryTool(services *Services) *GetSessionSummaryTool {
+	return &GetSessionSummaryTool{services: services}
+}
+
+func (t *GetSessionSummaryTool) Name() string {
+	return "get_session_summary"
+}
+
+func (t *GetSessionSummaryTool) Description() string {
+	return "Get a lightweight summary of a session including message counts, token usage, tool statistics, and error counts. Much smaller than full logs."
+}
+
+func (t *GetSessionSummaryTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"session_id": {
+				"type": "string",
+				"description": "Session UUID"
+			},
+			"agent_id": {
+				"type": "string",
+				"description": "Specific subagent ID to analyze (optional, e.g., 'a909e0c')"
+			},
+			"project": {
+				"type": "string",
+				"description": "Project name/path (optional)"
+			},
+			"include_sidechains": {
+				"type": "boolean",
+				"description": "Include sidechain (agent) conversations in analysis",
+				"default": true
+			},
+			"output_path": {
+				"type": "string",
+				"description": "File path to save the summary as JSON. If provided, creates parent directories automatically."
+			}
+		},
+		"required": ["session_id"]
+	}`)
+}
+
+func (t *GetSessionSummaryTool) Execute(args map[string]interface{}) (interface{}, error) {
+	sessionID := getString(args, "session_id")
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_id is required")
+	}
+
+	agentID := getString(args, "agent_id")
+	project := getString(args, "project")
+	includeSidechains := getBool(args, "include_sidechains", true)
+
+	summary, err := t.services.Session.GetSessionSummary(sessionID, agentID, project, includeSidechains)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session summary: %w", err)
+	}
+
+	if summary == nil {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// Save to file if output_path is provided
+	outputPath := getString(args, "output_path")
+	if outputPath != "" {
+		return saveToFile(summary, outputPath)
+	}
+
+	return summary, nil
+}
+
+// GetToolUsageStatsTool implements the get_tool_usage_stats tool.
+type GetToolUsageStatsTool struct {
+	services *Services
+}
+
+func NewGetToolUsageStatsTool(services *Services) *GetToolUsageStatsTool {
+	return &GetToolUsageStatsTool{services: services}
+}
+
+func (t *GetToolUsageStatsTool) Name() string {
+	return "get_tool_usage_stats"
+}
+
+func (t *GetToolUsageStatsTool) Description() string {
+	return "Get tool usage statistics for a session including tool counts, success/failure rates, and usage patterns."
+}
+
+func (t *GetToolUsageStatsTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"session_id": {
+				"type": "string",
+				"description": "Session UUID"
+			},
+			"agent_id": {
+				"type": "string",
+				"description": "Specific subagent ID to analyze (optional)"
+			},
+			"project": {
+				"type": "string",
+				"description": "Project name/path (optional)"
+			},
+			"include_sidechains": {
+				"type": "boolean",
+				"description": "Include sidechain (agent) conversations in analysis",
+				"default": true
+			},
+			"output_path": {
+				"type": "string",
+				"description": "File path to save the stats as JSON. If provided, creates parent directories automatically."
+			}
+		},
+		"required": ["session_id"]
+	}`)
+}
+
+func (t *GetToolUsageStatsTool) Execute(args map[string]interface{}) (interface{}, error) {
+	sessionID := getString(args, "session_id")
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_id is required")
+	}
+
+	agentID := getString(args, "agent_id")
+	project := getString(args, "project")
+	includeSidechains := getBool(args, "include_sidechains", true)
+
+	stats, err := t.services.Session.GetToolUsageStats(sessionID, agentID, project, includeSidechains)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tool usage stats: %w", err)
+	}
+
+	if stats == nil {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// Save to file if output_path is provided
+	outputPath := getString(args, "output_path")
+	if outputPath != "" {
+		return saveToFile(stats, outputPath)
+	}
+
+	return stats, nil
+}
+
+// GetSessionErrorsTool implements the get_session_errors tool.
+type GetSessionErrorsTool struct {
+	services *Services
+}
+
+func NewGetSessionErrorsTool(services *Services) *GetSessionErrorsTool {
+	return &GetSessionErrorsTool{services: services}
+}
+
+func (t *GetSessionErrorsTool) Name() string {
+	return "get_session_errors"
+}
+
+func (t *GetSessionErrorsTool) Description() string {
+	return "Get errors and blockers found in a session for debugging and analysis."
+}
+
+func (t *GetSessionErrorsTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"session_id": {
+				"type": "string",
+				"description": "Session UUID"
+			},
+			"agent_id": {
+				"type": "string",
+				"description": "Specific subagent ID to analyze (optional)"
+			},
+			"project": {
+				"type": "string",
+				"description": "Project name/path (optional)"
+			},
+			"include_sidechains": {
+				"type": "boolean",
+				"description": "Include sidechain (agent) conversations in analysis",
+				"default": true
+			},
+			"limit": {
+				"type": "integer",
+				"description": "Maximum number of errors to return",
+				"default": 20
+			},
+			"output_path": {
+				"type": "string",
+				"description": "File path to save the errors as JSON. If provided, creates parent directories automatically."
+			}
+		},
+		"required": ["session_id"]
+	}`)
+}
+
+func (t *GetSessionErrorsTool) Execute(args map[string]interface{}) (interface{}, error) {
+	sessionID := getString(args, "session_id")
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_id is required")
+	}
+
+	agentID := getString(args, "agent_id")
+	project := getString(args, "project")
+	includeSidechains := getBool(args, "include_sidechains", true)
+	limit := getInt(args, "limit")
+	if limit == 0 {
+		limit = 20
+	}
+
+	errors, err := t.services.Session.GetSessionErrors(sessionID, agentID, project, includeSidechains, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session errors: %w", err)
+	}
+
+	if errors == nil {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// Save to file if output_path is provided
+	outputPath := getString(args, "output_path")
+	if outputPath != "" {
+		return saveToFile(errors, outputPath)
+	}
+
+	return errors, nil
+}
+
+// GetSessionTimelineTool implements the get_session_timeline tool.
+type GetSessionTimelineTool struct {
+	services *Services
+}
+
+func NewGetSessionTimelineTool(services *Services) *GetSessionTimelineTool {
+	return &GetSessionTimelineTool{services: services}
+}
+
+func (t *GetSessionTimelineTool) Name() string {
+	return "get_session_timeline"
+}
+
+func (t *GetSessionTimelineTool) Description() string {
+	return "Get a condensed timeline of session events without full content. Shows step-by-step progression."
+}
+
+func (t *GetSessionTimelineTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"session_id": {
+				"type": "string",
+				"description": "Session UUID"
+			},
+			"agent_id": {
+				"type": "string",
+				"description": "Specific subagent ID to analyze (optional)"
+			},
+			"project": {
+				"type": "string",
+				"description": "Project name/path (optional)"
+			},
+			"include_sidechains": {
+				"type": "boolean",
+				"description": "Include sidechain (agent) conversations in analysis",
+				"default": true
+			},
+			"limit": {
+				"type": "integer",
+				"description": "Maximum number of timeline entries to return",
+				"default": 100
+			},
+			"output_path": {
+				"type": "string",
+				"description": "File path to save the timeline as JSON. If provided, creates parent directories automatically."
+			}
+		},
+		"required": ["session_id"]
+	}`)
+}
+
+func (t *GetSessionTimelineTool) Execute(args map[string]interface{}) (interface{}, error) {
+	sessionID := getString(args, "session_id")
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_id is required")
+	}
+
+	agentID := getString(args, "agent_id")
+	project := getString(args, "project")
+	includeSidechains := getBool(args, "include_sidechains", true)
+	limit := getInt(args, "limit")
+	if limit == 0 {
+		limit = 100
+	}
+
+	timeline, err := t.services.Session.GetSessionTimeline(sessionID, agentID, project, includeSidechains, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session timeline: %w", err)
+	}
+
+	if timeline == nil {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// Save to file if output_path is provided
+	outputPath := getString(args, "output_path")
+	if outputPath != "" {
+		return saveToFile(timeline, outputPath)
+	}
+
+	return timeline, nil
+}
+
+// GetSessionStatsTool implements the get_session_stats tool.
+type GetSessionStatsTool struct {
+	services *Services
+}
+
+func NewGetSessionStatsTool(services *Services) *GetSessionStatsTool {
+	return &GetSessionStatsTool{services: services}
+}
+
+func (t *GetSessionStatsTool) Name() string {
+	return "get_session_stats"
+}
+
+func (t *GetSessionStatsTool) Description() string {
+	return "Get comprehensive session statistics combining summary, tool usage, and errors. Optionally generates HTML visualization."
+}
+
+func (t *GetSessionStatsTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"session_id": {
+				"type": "string",
+				"description": "Session UUID"
+			},
+			"agent_id": {
+				"type": "string",
+				"description": "Specific subagent ID to analyze (optional)"
+			},
+			"project": {
+				"type": "string",
+				"description": "Project name/path (optional)"
+			},
+			"include_sidechains": {
+				"type": "boolean",
+				"description": "Include sidechain (agent) conversations in analysis",
+				"default": true
+			},
+			"errors_limit": {
+				"type": "integer",
+				"description": "Maximum errors to include",
+				"default": 10
+			},
+			"output_path": {
+				"type": "string",
+				"description": "Base path for output files (without extension). If not specified, uses temp directory."
+			},
+			"generate_html": {
+				"type": "boolean",
+				"description": "Generate HTML visualization alongside JSON",
+				"default": false
+			},
+			"open_browser": {
+				"type": "boolean",
+				"description": "Open HTML in browser (requires generate_html=true)",
+				"default": false
+			}
+		},
+		"required": ["session_id"]
+	}`)
+}
+
+func (t *GetSessionStatsTool) Execute(args map[string]interface{}) (interface{}, error) {
+	sessionID := getString(args, "session_id")
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_id is required")
+	}
+
+	agentID := getString(args, "agent_id")
+	project := getString(args, "project")
+	includeSidechains := getBool(args, "include_sidechains", true)
+	errorsLimit := getInt(args, "errors_limit")
+	if errorsLimit == 0 {
+		errorsLimit = 10
+	}
+
+	stats, err := t.services.Session.GetSessionStats(sessionID, agentID, project, includeSidechains, errorsLimit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get session stats: %w", err)
+	}
+
+	if stats == nil {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// Handle file output and HTML generation
+	outputPath := getString(args, "output_path")
+	generateHTML := getBool(args, "generate_html", false)
+	openBrowser := getBool(args, "open_browser", false)
+
+	if outputPath != "" || generateHTML {
+		files, err := t.saveStatsFiles(stats, outputPath, generateHTML, openBrowser)
+		if err != nil {
+			return nil, fmt.Errorf("failed to save stats files: %w", err)
+		}
+		stats.Files = files
+	}
+
+	return stats, nil
+}
+
+// saveStatsFiles saves stats to JSON and optionally HTML files.
+func (t *GetSessionStatsTool) saveStatsFiles(stats *models.SessionStats, outputPath string, generateHTML, openBrowser bool) (*models.OutputFiles, error) {
+	// Determine output path
+	if outputPath == "" {
+		outputPath = fmt.Sprintf("/tmp/session-stats-%s", stats.SessionID[:8])
+	}
+
+	files := &models.OutputFiles{}
+
+	// Save JSON
+	jsonPath := outputPath + ".json"
+	jsonData, err := json.MarshalIndent(stats, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal stats: %w", err)
+	}
+
+	if err := writeFile(jsonPath, jsonData); err != nil {
+		return nil, fmt.Errorf("failed to write JSON: %w", err)
+	}
+	files.JSONPath = jsonPath
+
+	// Generate HTML if requested
+	if generateHTML {
+		htmlPath := outputPath + ".html"
+		htmlContent := generateStatsHTML(stats)
+
+		if err := writeFile(htmlPath, []byte(htmlContent)); err != nil {
+			return nil, fmt.Errorf("failed to write HTML: %w", err)
+		}
+		files.HTMLPath = htmlPath
+
+		// Open browser if requested
+		if openBrowser {
+			if err := openInBrowser(htmlPath); err == nil {
+				files.OpenedBrowser = true
+			}
+		}
+	}
+
+	return files, nil
+}
+
+// generateStatsHTML generates HTML visualization of stats.
+func generateStatsHTML(stats *models.SessionStats) string {
+	// Simple HTML template for stats visualization
+	html := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>` + stats.Project + ` - Session Stats</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@0.9.4/css/bulma.min.css">
+    <style>
+        .stat-card { margin-bottom: 1rem; }
+        .timeline-item { padding: 0.5rem; border-left: 3px solid #3273dc; margin-left: 1rem; }
+        .timeline-item.error { border-left-color: #f14668; }
+        .tool-bar { height: 20px; background: #3273dc; margin: 2px 0; }
+        pre { background: #f5f5f5; padding: 1rem; overflow-x: auto; font-size: 0.85em; }
+        .error-entry-index { font-size: 0.85em; color: #666; margin-left: 0.5rem; }
+        .header-project { font-size: 0.6em; color: #7a7a7a; font-weight: normal; }
+    </style>
+</head>
+<body>
+<section class="section">
+    <div class="container">
+        <h1 class="title">
+            ` + stats.Project + `
+            <span class="header-project">Session Statistics</span>
+        </h1>
+        <p class="subtitle">
+            <span class="tag is-medium is-light">` + stats.SessionID + `</span>
+            <span class="tag is-medium is-info is-light">` + stats.Summary.Date + `</span>
+        </p>
+
+        <div class="columns">
+            <div class="column">
+                <div class="box stat-card">
+                    <h3 class="title is-5">Summary</h3>
+                    <table class="table is-fullwidth">
+                        <tr><td>Project</td><td><strong>` + stats.Project + `</strong></td></tr>
+                        <tr><td>Date</td><td>` + stats.Summary.Date + `</td></tr>
+                        <tr><td>Duration</td><td>` + fmt.Sprintf("%d", stats.Summary.DurationMinutes) + ` minutes</td></tr>
+                        <tr><td>Messages</td><td>` + fmt.Sprintf("%d", stats.Summary.MessageCount) + ` (` + fmt.Sprintf("%d", stats.Summary.UserMessages) + ` user, ` + fmt.Sprintf("%d", stats.Summary.AssistantMsgs) + ` assistant)</td></tr>
+                        <tr><td>Errors</td><td>` + fmt.Sprintf("%d", stats.Summary.ErrorCount) + `</td></tr>
+                    </table>
+                </div>
+            </div>
+            <div class="column">
+                <div class="box stat-card">
+                    <h3 class="title is-5">Tokens</h3>
+                    <table class="table is-fullwidth">
+                        <tr><td>Input</td><td>` + fmt.Sprintf("%d", stats.Summary.Tokens.TotalInput) + `</td></tr>
+                        <tr><td>Output</td><td>` + fmt.Sprintf("%d", stats.Summary.Tokens.TotalOutput) + `</td></tr>
+                        <tr><td>Cache Read</td><td>` + fmt.Sprintf("%d", stats.Summary.Tokens.CacheRead) + `</td></tr>
+                        <tr><td>Cache Creation</td><td>` + fmt.Sprintf("%d", stats.Summary.Tokens.CacheCreation) + `</td></tr>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="box">
+            <h3 class="title is-5">Tool Usage</h3>
+            <table class="table is-fullwidth">
+                <thead>
+                    <tr><th>Tool</th><th>Count</th><th>Success</th><th>Failed</th></tr>
+                </thead>
+                <tbody>`
+
+	for _, tool := range stats.ToolStats.Tools {
+		html += fmt.Sprintf(`
+                    <tr>
+                        <td>%s</td>
+                        <td>%d</td>
+                        <td class="has-text-success">%d</td>
+                        <td class="has-text-danger">%d</td>
+                    </tr>`, tool.Name, tool.Count, tool.Success, tool.Failed)
+	}
+
+	html += `
+                </tbody>
+            </table>
+        </div>
+
+        <div class="box">
+            <h3 class="title is-5">Tool Sequence</h3>
+            <div class="tool-sequence" style="display: flex; flex-wrap: wrap; gap: 4px;">`
+
+	for _, entry := range stats.ToolStats.ToolSequence {
+		html += fmt.Sprintf(`<span class="tag is-info" title="%s">%s</span>`, entry.ToolUseID, entry.Name)
+	}
+
+	html += `
+            </div>
+        </div>
+
+        <div class="box">
+            <h3 class="title is-5">Errors (` + fmt.Sprintf("%d", stats.Errors.TotalErrors) + ` total)</h3>`
+
+	if len(stats.Errors.Errors) == 0 {
+		html += `<p class="has-text-success">No errors found</p>`
+	} else {
+		for _, err := range stats.Errors.Errors {
+			toolInfo := ""
+			if err.ToolName != "" {
+				toolInfo = " - " + err.ToolName
+			}
+			html += fmt.Sprintf(`
+            <article class="message is-danger">
+                <div class="message-header">
+                    <p>%s%s <span class="error-entry-index">(entry #%d)</span></p>
+                    <span>%s</span>
+                </div>
+                <div class="message-body">
+                    <div class="error-message">%s</div>
+                    <p class="mt-2"><code class="has-text-grey">UUID: %s</code></p>
+                    <p class="is-size-7 has-text-grey">Use get_logs_around_entry(uuid: "%s", offset: 3) to see context</p>
+                </div>
+            </article>`, err.Type, toolInfo, err.EntryIndex, err.Timestamp, escapeHTML(err.Message), err.UUID, err.UUID)
+		}
+	}
+
+	html += `
+        </div>
+
+        <div class="box">
+            <h3 class="title is-5">Raw JSON</h3>
+            <pre>` + escapeHTML(mustMarshalIndent(stats)) + `</pre>
+        </div>
+    </div>
+</section>
+</body>
+</html>`
+
+	return html
+}
+
+// escapeHTML escapes HTML special characters.
+func escapeHTML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
+	s = strings.ReplaceAll(s, "'", "&#39;")
+	return s
+}
+
+// mustMarshalIndent marshals to indented JSON, returning empty on error.
+func mustMarshalIndent(v interface{}) string {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// writeFile writes data to a file.
+func writeFile(path string, data []byte) error {
+	return os.WriteFile(path, data, 0644)
+}
+
+// openInBrowser opens a file in the default browser.
+func openInBrowser(path string) error {
+	return browser.OpenInBrowser(path)
+}
+
+// GetLogsAroundEntryTool implements the get_logs_around_entry tool.
+type GetLogsAroundEntryTool struct {
+	services *Services
+}
+
+func NewGetLogsAroundEntryTool(services *Services) *GetLogsAroundEntryTool {
+	return &GetLogsAroundEntryTool{services: services}
+}
+
+func (t *GetLogsAroundEntryTool) Name() string {
+	return "get_logs_around_entry"
+}
+
+func (t *GetLogsAroundEntryTool) Description() string {
+	return "Get logs around a specific entry identified by UUID. Use negative offset for entries BEFORE (e.g., -3 for 3 prior entries + target), positive offset for entries AFTER (e.g., +3 for target + 3 following entries)."
+}
+
+func (t *GetLogsAroundEntryTool) InputSchema() json.RawMessage {
+	return json.RawMessage(`{
+		"type": "object",
+		"properties": {
+			"session_id": {
+				"type": "string",
+				"description": "Session UUID"
+			},
+			"uuid": {
+				"type": "string",
+				"description": "UUID of the target log entry"
+			},
+			"project": {
+				"type": "string",
+				"description": "Project name/path (optional)"
+			},
+			"offset": {
+				"type": "integer",
+				"description": "Direction and count: negative = entries BEFORE target (e.g., -3), positive = entries AFTER target (e.g., +3). Default: -3"
+			},
+			"include_sidechains": {
+				"type": "boolean",
+				"description": "Include sidechain (agent) conversations",
+				"default": true
+			},
+			"output_path": {
+				"type": "string",
+				"description": "File path to save the logs as JSON. If provided, creates parent directories automatically."
+			}
+		},
+		"required": ["session_id", "uuid"]
+	}`)
+}
+
+func (t *GetLogsAroundEntryTool) Execute(args map[string]interface{}) (interface{}, error) {
+	sessionID := getString(args, "session_id")
+	if sessionID == "" {
+		return nil, fmt.Errorf("session_id is required")
+	}
+
+	targetUUID := getString(args, "uuid")
+	if targetUUID == "" {
+		return nil, fmt.Errorf("uuid is required")
+	}
+
+	project := getString(args, "project")
+	offset := getInt(args, "offset")
+	if offset == 0 {
+		offset = 3
+	}
+	includeSidechains := getBool(args, "include_sidechains", true)
+
+	logs, err := t.services.Session.GetLogsAroundEntry(sessionID, targetUUID, project, offset, includeSidechains)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get logs around entry: %w", err)
+	}
+
+	if logs == nil {
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// Save to file if output_path is provided
+	outputPath := getString(args, "output_path")
+	if outputPath != "" {
+		return saveToFile(logs, outputPath)
+	}
+
+	return logs, nil
+}
+
 // Helper functions for argument extraction
 func getString(args map[string]interface{}, key string) string {
 	if v, ok := args[key].(string); ok {
@@ -545,6 +1287,16 @@ func RegisterAllTools(server *Server, services *Services) {
 	server.RegisterTool(NewGetAgentSessionsTool(services))
 	server.RegisterTool(NewSearchLogsTool(services))
 	server.RegisterTool(NewGenerateHTMLTool(services))
+
+	// Session stats tools
+	server.RegisterTool(NewGetSessionSummaryTool(services))
+	server.RegisterTool(NewGetToolUsageStatsTool(services))
+	server.RegisterTool(NewGetSessionErrorsTool(services))
+	server.RegisterTool(NewGetSessionTimelineTool(services))
+	server.RegisterTool(NewGetSessionStatsTool(services))
+
+	// Log exploration tools
+	server.RegisterTool(NewGetLogsAroundEntryTool(services))
 }
 
 // Ensure all tools implement the Tool interface
@@ -555,6 +1307,12 @@ var _ Tool = (*ListAgentsTool)(nil)
 var _ Tool = (*GetAgentSessionsTool)(nil)
 var _ Tool = (*SearchLogsTool)(nil)
 var _ Tool = (*GenerateHTMLTool)(nil)
+var _ Tool = (*GetSessionSummaryTool)(nil)
+var _ Tool = (*GetToolUsageStatsTool)(nil)
+var _ Tool = (*GetSessionErrorsTool)(nil)
+var _ Tool = (*GetSessionTimelineTool)(nil)
+var _ Tool = (*GetSessionStatsTool)(nil)
+var _ Tool = (*GetLogsAroundEntryTool)(nil)
 
 // Suppress unused variable warning
 var _ = []models.Project{}
