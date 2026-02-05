@@ -2,11 +2,13 @@ package processor
 
 import (
 	"encoding/json"
+	"sort"
+	"strings"
+	"time"
+
 	"github.com/brads3290/cclogviewer/internal/constants"
 	"github.com/brads3290/cclogviewer/internal/models"
 	"github.com/brads3290/cclogviewer/internal/utils"
-	"strings"
-	"time"
 )
 
 // ProcessEntries builds a hierarchical structure from flat log entries.
@@ -90,6 +92,7 @@ func processEntry(entry models.LogEntry) *models.ProcessedEntry {
 		Type:         entry.Type,
 		Timestamp:    formatTimestamp(entry.Timestamp),
 		RawTimestamp: entry.Timestamp,
+		AgentID:      entry.AgentID,
 	}
 
 	if entry.ParentUUID != nil {
@@ -155,6 +158,44 @@ func collectSidechainEntries(root *models.ProcessedEntry, entryMap map[string]*m
 	}
 
 	buildTree(root, false)
+
+	// Fallback: If tree traversal found few entries and we have an AgentID,
+	// collect all entries with the same AgentID (handles broken parent-child chains)
+	if root.AgentID != "" {
+		// Count how many entries we expect with this AgentID
+		expectedCount := 0
+		for _, e := range entryMap {
+			if e.AgentID == root.AgentID && e.IsSidechain {
+				expectedCount++
+			}
+		}
+
+		// If tree traversal missed entries, use AgentID-based collection
+		if len(result) < expectedCount {
+			result = nil // Reset result
+			collected := make(map[string]bool)
+
+			// Collect all entries with matching AgentID, sorted by timestamp
+			for _, e := range entryMap {
+				if e.AgentID == root.AgentID && e.IsSidechain {
+					// Skip tool results that are attached to tool calls
+					if e.IsToolResult && attachedToolResults[e.UUID] {
+						continue
+					}
+					if !collected[e.UUID] {
+						result = append(result, e)
+						collected[e.UUID] = true
+					}
+				}
+			}
+
+			// Sort by timestamp for consistent ordering
+			sort.Slice(result, func(i, j int) bool {
+				return result[i].RawTimestamp < result[j].RawTimestamp
+			})
+		}
+	}
+
 	return result
 }
 
@@ -188,7 +229,10 @@ func extractContent(entry *models.ProcessedEntry) string {
 func getFirstUserMessage(root *models.ProcessedEntry, entryMap map[string]*models.ProcessedEntry) string {
 	// First check if root itself is a user message
 	if root.Role == constants.RoleUser {
-		return extractContent(root)
+		content := extractContent(root)
+		if content != "" {
+			return content
+		}
 	}
 
 	// Otherwise, look for the first user message in the tree
@@ -218,7 +262,34 @@ func getFirstUserMessage(root *models.ProcessedEntry, entryMap map[string]*model
 		return ""
 	}
 
-	return findFirstUser(root)
+	result := findFirstUser(root)
+	if result != "" {
+		return result
+	}
+
+	// Fallback: If tree traversal failed and we have an AgentID, search all entries with same AgentID
+	if root.AgentID != "" {
+		var firstUserContent string
+		var firstUserTime time.Time
+
+		for _, e := range entryMap {
+			if e.AgentID == root.AgentID && e.Role == constants.RoleUser && e.IsSidechain {
+				content := extractContent(e)
+				if content == "" {
+					continue
+				}
+				if t, err := time.Parse(time.RFC3339, e.RawTimestamp); err == nil {
+					if firstUserContent == "" || t.Before(firstUserTime) {
+						firstUserContent = content
+						firstUserTime = t
+					}
+				}
+			}
+		}
+		return firstUserContent
+	}
+
+	return ""
 }
 
 // getLastAssistantMessage finds the last assistant message in a sidechain conversation
@@ -228,13 +299,16 @@ func getLastAssistantMessage(root *models.ProcessedEntry, entryMap map[string]*m
 
 	var findLastAssistant func(entry *models.ProcessedEntry)
 	findLastAssistant = func(entry *models.ProcessedEntry) {
-		// Check if this is an assistant message
+		// Check if this is an assistant message with content
 		if entry.Role == constants.RoleAssistant && !entry.IsToolResult {
-			// Parse timestamp
-			if t, err := time.Parse(time.RFC3339, entry.RawTimestamp); err == nil {
-				if lastAssistantContent == "" || t.After(lastAssistantTime) {
-					lastAssistantContent = extractContent(entry)
-					lastAssistantTime = t
+			content := extractContent(entry)
+			if content != "" {
+				// Parse timestamp
+				if t, err := time.Parse(time.RFC3339, entry.RawTimestamp); err == nil {
+					if lastAssistantContent == "" || t.After(lastAssistantTime) {
+						lastAssistantContent = content
+						lastAssistantTime = t
+					}
 				}
 			}
 		}
@@ -263,6 +337,30 @@ func getLastAssistantMessage(root *models.ProcessedEntry, entryMap map[string]*m
 	}
 
 	findLastAssistant(root)
+
+	// If tree traversal found a result, return it
+	if lastAssistantContent != "" {
+		return lastAssistantContent
+	}
+
+	// Fallback: If tree traversal failed and we have an AgentID, search all entries with same AgentID
+	if root.AgentID != "" {
+		for _, e := range entryMap {
+			if e.AgentID == root.AgentID && e.Role == constants.RoleAssistant && e.IsSidechain && !e.IsToolResult {
+				content := extractContent(e)
+				if content == "" {
+					continue
+				}
+				if t, err := time.Parse(time.RFC3339, e.RawTimestamp); err == nil {
+					if lastAssistantContent == "" || t.After(lastAssistantTime) {
+						lastAssistantContent = content
+						lastAssistantTime = t
+					}
+				}
+			}
+		}
+	}
+
 	return lastAssistantContent
 }
 

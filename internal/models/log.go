@@ -20,6 +20,7 @@ type LogEntry struct {
 	Timestamp     string          `json:"timestamp"`
 	IsMeta        bool            `json:"isMeta"`
 	ToolUseResult interface{}     `json:"toolUseResult"`
+	AgentID       string          `json:"agentId"`
 }
 
 // TokenMetrics groups token usage and counting metrics.
@@ -50,6 +51,7 @@ type ProcessedEntry struct {
 	RawTimestamp string // Keep the raw timestamp for comparisons
 	Role         string
 	Content      string // Raw content, HTML escaping happens in templates
+	AgentID      string // Agent ID for sidechain entries
 
 	// Relationships
 	Children []*ProcessedEntry

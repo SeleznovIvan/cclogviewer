@@ -3,6 +3,13 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime/debug"
+	"strings"
+	"time"
+
+	"github.com/brads3290/cclogviewer/cmd/cclogviewer/commands"
 	"github.com/brads3290/cclogviewer/internal/browser"
 	"github.com/brads3290/cclogviewer/internal/constants"
 	debugpkg "github.com/brads3290/cclogviewer/internal/debug"
@@ -10,12 +17,6 @@ import (
 	"github.com/brads3290/cclogviewer/internal/parser"
 	"github.com/brads3290/cclogviewer/internal/processor"
 	"github.com/brads3290/cclogviewer/internal/renderer"
-	"log"
-	"os"
-	"path/filepath"
-	"runtime/debug"
-	"strings"
-	"time"
 )
 
 var (
@@ -26,6 +27,105 @@ var (
 )
 
 func main() {
+	// Check for help/version flags first (before legacy mode detection)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "--help", "-h", "help":
+			commands.DefaultRegistry.PrintHelp(os.Stdout)
+			os.Exit(0)
+		case "--version", "-v", "version":
+			printVersion()
+			os.Exit(0)
+		}
+	}
+
+	// If no arguments, print help
+	if len(os.Args) < 2 {
+		commands.DefaultRegistry.PrintHelp(os.Stdout)
+		os.Exit(0)
+	}
+
+	// Check if running in legacy mode (first arg starts with - and is a legacy flag)
+	if len(os.Args) > 1 && isLegacyFlag(os.Args[1]) {
+		runLegacyMode()
+		return
+	}
+
+	// Run subcommand mode
+	if err := runSubcommandMode(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// isLegacyFlag checks if the argument is a legacy mode flag.
+func isLegacyFlag(arg string) bool {
+	legacyFlags := []string{"-input", "-output", "-open", "-debug", "-contextsize"}
+	for _, f := range legacyFlags {
+		if arg == f || strings.HasPrefix(arg, f+"=") {
+			return true
+		}
+	}
+	return false
+}
+
+// runSubcommandMode handles the new subcommand-based CLI.
+func runSubcommandMode() error {
+	cmdName := os.Args[1]
+
+	// Look up command
+	cmd, ok := commands.DefaultRegistry.Get(cmdName)
+	if !ok {
+		return fmt.Errorf("unknown command: %s\nRun 'cclogviewer --help' for usage", cmdName)
+	}
+
+	// Parse global flags and command flags
+	fs := flag.NewFlagSet(cmdName, flag.ContinueOnError)
+
+	// Global flags
+	var config commands.Config
+	var homeDir string
+	if hd, err := os.UserHomeDir(); err == nil {
+		homeDir = filepath.Join(hd, ".claude")
+	}
+
+	fs.StringVar(&config.ClaudeDir, "claude-dir", homeDir, "Path to Claude directory")
+	fs.BoolVar(&config.JSONOutput, "json", false, "Output in JSON format")
+	fs.BoolVar(&config.Debug, "debug", false, "Enable debug logging")
+
+	// Command-specific flags
+	cmd.Setup(fs)
+
+	// Custom usage
+	fs.Usage = func() {
+		fmt.Fprintf(os.Stderr, "cclogviewer %s - %s\n\n", cmd.Name(), cmd.Description())
+		fmt.Fprintf(os.Stderr, "Usage: cclogviewer %s [flags] [arguments]\n\n", cmd.Name())
+		fmt.Fprintln(os.Stderr, "Flags:")
+		fs.PrintDefaults()
+	}
+
+	// Parse flags (skip program name and command name)
+	if err := fs.Parse(os.Args[2:]); err != nil {
+		if err == flag.ErrHelp {
+			return nil
+		}
+		return err
+	}
+
+	// Enable debug mode
+	if config.Debug {
+		debugpkg.Enabled = true
+	}
+
+	// Create context
+	ctx := commands.NewContext(&config)
+
+	// Run command with remaining arguments
+	return cmd.Run(ctx, fs.Args())
+}
+
+// runLegacyMode handles the original -input/-output flag-based CLI.
+func runLegacyMode() {
 	var inputFile, outputFile string
 	var openBrowser, showVersion, showContextSize bool
 	flag.StringVar(&inputFile, "input", "", "Input JSONL file path")
@@ -37,29 +137,17 @@ func main() {
 	flag.Parse()
 
 	if showVersion {
-		version := Version
-		if version == "" {
-			// Try to get version from build info
-			if info, ok := debug.ReadBuildInfo(); ok {
-				version = info.Main.Version
-				if version == constants.DevelopmentVersionString {
-					version = constants.DevVersionString
-				}
-			} else {
-				version = constants.UnknownVersionString
-			}
-		}
-
-		fmt.Printf("cclogviewer version %s", version)
-		if BuildTime != "" {
-			fmt.Printf(" (built %s)", BuildTime)
-		}
-		fmt.Println()
+		printVersion()
 		os.Exit(0)
 	}
 
 	if inputFile == "" {
-		log.Fatal("Please provide an input file using -input flag")
+		fmt.Fprintln(os.Stderr, "Please provide an input file using -input flag")
+		fmt.Fprintln(os.Stderr, "\nUsage:")
+		fmt.Fprintln(os.Stderr, "  Legacy mode:    cclogviewer -input <file.jsonl> [flags]")
+		fmt.Fprintln(os.Stderr, "  Subcommand mode: cclogviewer <command> [flags] [arguments]")
+		fmt.Fprintln(os.Stderr, "\nRun 'cclogviewer --help' for full usage information")
+		os.Exit(1)
 	}
 
 	// If no output file specified, create a temp file and auto-open it
@@ -75,7 +163,8 @@ func main() {
 
 	entries, err := parser.ReadJSONLFile(inputFile)
 	if err != nil {
-		log.Fatalf("Error reading file: %v", err)
+		fmt.Fprintf(os.Stderr, "Error reading file: %v\n", err)
+		os.Exit(1)
 	}
 
 	processed := processor.ProcessEntries(entries)
@@ -85,7 +174,7 @@ func main() {
 		// Find the last assistant message
 		var lastAssistantTokens int
 		var foundAssistant bool
-		
+
 		// Traverse all processed entries to find the last assistant message
 		var findLastAssistant func([]*models.ProcessedEntry)
 		findLastAssistant = func(entries []*models.ProcessedEntry) {
@@ -105,9 +194,9 @@ func main() {
 				}
 			}
 		}
-		
+
 		findLastAssistant(processed)
-		
+
 		if foundAssistant {
 			fmt.Println(lastAssistantTokens)
 		} else {
@@ -118,7 +207,8 @@ func main() {
 
 	err = renderer.GenerateHTML(processed, outputFile, debugpkg.Enabled)
 	if err != nil {
-		log.Fatalf("Error generating HTML: %v", err)
+		fmt.Fprintf(os.Stderr, "Error generating HTML: %v\n", err)
+		os.Exit(1)
 	}
 
 	fmt.Printf("Successfully generated %s\n", outputFile)
@@ -126,7 +216,29 @@ func main() {
 	// Open browser if -open flag was set OR if output was auto-generated
 	if openBrowser || autoOpen {
 		if err := browser.OpenInBrowser(outputFile); err != nil {
-			log.Printf("Warning: Could not open browser: %v", err)
+			fmt.Fprintf(os.Stderr, "Warning: Could not open browser: %v\n", err)
 		}
 	}
+}
+
+// printVersion prints version information.
+func printVersion() {
+	version := Version
+	if version == "" {
+		// Try to get version from build info
+		if info, ok := debug.ReadBuildInfo(); ok {
+			version = info.Main.Version
+			if version == constants.DevelopmentVersionString {
+				version = constants.DevVersionString
+			}
+		} else {
+			version = constants.UnknownVersionString
+		}
+	}
+
+	fmt.Printf("cclogviewer version %s", version)
+	if BuildTime != "" {
+		fmt.Printf(" (built %s)", BuildTime)
+	}
+	fmt.Println()
 }
