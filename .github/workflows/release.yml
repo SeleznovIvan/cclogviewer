@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Run tests
+        run: go test -v ./...
+
+      - name: Build binaries
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          BUILD_TIME=$(date +%FT%T%z)
+          LDFLAGS="-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME}"
+
+          # Build cclogviewer (main CLI)
+          GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o cclogviewer-darwin-arm64 ./cmd/cclogviewer
+          GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" -o cclogviewer-darwin-amd64 ./cmd/cclogviewer
+          GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o cclogviewer-linux-amd64 ./cmd/cclogviewer
+          GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS" -o cclogviewer-linux-arm64 ./cmd/cclogviewer
+          GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o cclogviewer-windows-amd64.exe ./cmd/cclogviewer
+
+          # Build cclogviewer-mcp (MCP server)
+          GOOS=darwin GOARCH=arm64 go build -ldflags "$LDFLAGS" -o cclogviewer-mcp-darwin-arm64 ./cmd/cclogviewer-mcp
+          GOOS=darwin GOARCH=amd64 go build -ldflags "$LDFLAGS" -o cclogviewer-mcp-darwin-amd64 ./cmd/cclogviewer-mcp
+          GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -o cclogviewer-mcp-linux-amd64 ./cmd/cclogviewer-mcp
+          GOOS=linux GOARCH=arm64 go build -ldflags "$LDFLAGS" -o cclogviewer-mcp-linux-arm64 ./cmd/cclogviewer-mcp
+          GOOS=windows GOARCH=amd64 go build -ldflags "$LDFLAGS" -o cclogviewer-mcp-windows-amd64.exe ./cmd/cclogviewer-mcp
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            cclogviewer-darwin-arm64
+            cclogviewer-darwin-amd64
+            cclogviewer-linux-amd64
+            cclogviewer-linux-arm64
+            cclogviewer-windows-amd64.exe
+            cclogviewer-mcp-darwin-arm64
+            cclogviewer-mcp-darwin-amd64
+            cclogviewer-mcp-linux-amd64
+            cclogviewer-mcp-linux-arm64
+            cclogviewer-mcp-windows-amd64.exe
