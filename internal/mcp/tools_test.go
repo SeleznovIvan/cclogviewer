@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/brads3290/cclogviewer/internal/models"
 	"github.com/brads3290/cclogviewer/internal/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -220,4 +221,265 @@ func TestRegisterAllTools_IncludesGenerateHTML(t *testing.T) {
 	// that the interface verifications compile (done at package level)
 	// The interface verification at package level ensures all tools are properly registered
 	assert.NotNil(t, server)
+}
+
+// createTestJSONLFile creates a temporary JSONL file with test session data.
+func createTestJSONLFile(t *testing.T) string {
+	t.Helper()
+	tempDir := t.TempDir()
+	inputFile := filepath.Join(tempDir, "test-session.jsonl")
+	sessionContent := `{"uuid":"msg-001","type":"message","timestamp":"2024-01-01T10:00:00Z","message":{"role":"user","content":"Hello from file"}}
+{"uuid":"msg-002","type":"message","timestamp":"2024-01-01T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"Response from file"}]}}
+{"uuid":"msg-003","type":"message","timestamp":"2024-01-01T10:00:02Z","message":{"role":"user","content":"Follow up question"}}
+{"uuid":"msg-004","type":"message","timestamp":"2024-01-01T10:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"Follow up answer"}]}}
+`
+	err := os.WriteFile(inputFile, []byte(sessionContent), 0644)
+	require.NoError(t, err)
+	return inputFile
+}
+
+// --- Tests for file_path support across all tools ---
+
+func TestGetSessionLogsTool_FilePath(t *testing.T) {
+	services := NewServices("")
+	tool := NewGetSessionLogsTool(services)
+
+	t.Run("schema includes file_path", func(t *testing.T) {
+		schema := tool.InputSchema()
+		assert.Contains(t, string(schema), "file_path")
+		assert.NotContains(t, string(schema), `"required"`)
+	})
+
+	t.Run("requires session_id or file_path", func(t *testing.T) {
+		_, err := tool.Execute(map[string]interface{}{})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "either session_id or file_path is required")
+	})
+
+	t.Run("file not found", func(t *testing.T) {
+		_, err := tool.Execute(map[string]interface{}{
+			"file_path": "/nonexistent/file.jsonl",
+		})
+		assert.Error(t, err)
+	})
+
+	t.Run("succeeds with file_path", func(t *testing.T) {
+		inputFile := createTestJSONLFile(t)
+		result, err := tool.Execute(map[string]interface{}{
+			"file_path": inputFile,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+
+		logs, ok := result.(*models.SessionLogs)
+		require.True(t, ok)
+		assert.Equal(t, "test-session", logs.SessionID)
+		assert.Equal(t, inputFile, logs.Project)
+		assert.Len(t, logs.Entries, 4)
+	})
+}
+
+func TestGetSessionSummaryTool_FilePath(t *testing.T) {
+	services := NewServices("")
+	tool := NewGetSessionSummaryTool(services)
+
+	t.Run("schema includes file_path", func(t *testing.T) {
+		schema := tool.InputSchema()
+		assert.Contains(t, string(schema), "file_path")
+		assert.NotContains(t, string(schema), `"required"`)
+	})
+
+	t.Run("requires session_id or file_path", func(t *testing.T) {
+		_, err := tool.Execute(map[string]interface{}{})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "either session_id or file_path is required")
+	})
+
+	t.Run("succeeds with file_path", func(t *testing.T) {
+		inputFile := createTestJSONLFile(t)
+		result, err := tool.Execute(map[string]interface{}{
+			"file_path": inputFile,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+
+		summary, ok := result.(*models.SessionSummary)
+		require.True(t, ok)
+		assert.Equal(t, "test-session", summary.SessionID)
+		assert.Greater(t, summary.MessageCount, 0)
+	})
+}
+
+func TestGetToolUsageStatsTool_FilePath(t *testing.T) {
+	services := NewServices("")
+	tool := NewGetToolUsageStatsTool(services)
+
+	t.Run("schema includes file_path", func(t *testing.T) {
+		schema := tool.InputSchema()
+		assert.Contains(t, string(schema), "file_path")
+	})
+
+	t.Run("requires session_id or file_path", func(t *testing.T) {
+		_, err := tool.Execute(map[string]interface{}{})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "either session_id or file_path is required")
+	})
+
+	t.Run("succeeds with file_path", func(t *testing.T) {
+		inputFile := createTestJSONLFile(t)
+		result, err := tool.Execute(map[string]interface{}{
+			"file_path": inputFile,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+
+		stats, ok := result.(*models.ToolUsageStats)
+		require.True(t, ok)
+		assert.Equal(t, "test-session", stats.SessionID)
+	})
+}
+
+func TestGetSessionErrorsTool_FilePath(t *testing.T) {
+	services := NewServices("")
+	tool := NewGetSessionErrorsTool(services)
+
+	t.Run("schema includes file_path", func(t *testing.T) {
+		schema := tool.InputSchema()
+		assert.Contains(t, string(schema), "file_path")
+	})
+
+	t.Run("requires session_id or file_path", func(t *testing.T) {
+		_, err := tool.Execute(map[string]interface{}{})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "either session_id or file_path is required")
+	})
+
+	t.Run("succeeds with file_path", func(t *testing.T) {
+		inputFile := createTestJSONLFile(t)
+		result, err := tool.Execute(map[string]interface{}{
+			"file_path": inputFile,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+
+		errors, ok := result.(*models.SessionErrors)
+		require.True(t, ok)
+		assert.Equal(t, "test-session", errors.SessionID)
+	})
+}
+
+func TestGetSessionTimelineTool_FilePath(t *testing.T) {
+	services := NewServices("")
+	tool := NewGetSessionTimelineTool(services)
+
+	t.Run("schema includes file_path", func(t *testing.T) {
+		schema := tool.InputSchema()
+		assert.Contains(t, string(schema), "file_path")
+	})
+
+	t.Run("requires session_id or file_path", func(t *testing.T) {
+		_, err := tool.Execute(map[string]interface{}{})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "either session_id or file_path is required")
+	})
+
+	t.Run("succeeds with file_path", func(t *testing.T) {
+		inputFile := createTestJSONLFile(t)
+		result, err := tool.Execute(map[string]interface{}{
+			"file_path": inputFile,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+
+		timeline, ok := result.(*models.SessionTimeline)
+		require.True(t, ok)
+		assert.Equal(t, "test-session", timeline.SessionID)
+		assert.Greater(t, len(timeline.Timeline), 0)
+	})
+}
+
+func TestGetSessionStatsTool_FilePath(t *testing.T) {
+	services := NewServices("")
+	tool := NewGetSessionStatsTool(services)
+
+	t.Run("schema includes file_path", func(t *testing.T) {
+		schema := tool.InputSchema()
+		assert.Contains(t, string(schema), "file_path")
+	})
+
+	t.Run("requires session_id or file_path", func(t *testing.T) {
+		_, err := tool.Execute(map[string]interface{}{})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "either session_id or file_path is required")
+	})
+
+	t.Run("succeeds with file_path", func(t *testing.T) {
+		inputFile := createTestJSONLFile(t)
+		result, err := tool.Execute(map[string]interface{}{
+			"file_path": inputFile,
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+
+		stats, ok := result.(*models.SessionStats)
+		require.True(t, ok)
+		assert.Equal(t, "test-session", stats.SessionID)
+		assert.NotNil(t, stats.Summary)
+		assert.NotNil(t, stats.ToolStats)
+		assert.NotNil(t, stats.Errors)
+	})
+}
+
+func TestGetLogsAroundEntryTool_FilePath(t *testing.T) {
+	services := NewServices("")
+	tool := NewGetLogsAroundEntryTool(services)
+
+	t.Run("schema includes file_path", func(t *testing.T) {
+		schema := tool.InputSchema()
+		assert.Contains(t, string(schema), "file_path")
+		assert.Contains(t, string(schema), `"required": ["uuid"]`)
+	})
+
+	t.Run("requires session_id or file_path", func(t *testing.T) {
+		_, err := tool.Execute(map[string]interface{}{
+			"uuid": "msg-002",
+		})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "either session_id or file_path is required")
+	})
+
+	t.Run("requires uuid", func(t *testing.T) {
+		_, err := tool.Execute(map[string]interface{}{
+			"file_path": "/some/file.jsonl",
+		})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "uuid is required")
+	})
+
+	t.Run("succeeds with file_path", func(t *testing.T) {
+		inputFile := createTestJSONLFile(t)
+		result, err := tool.Execute(map[string]interface{}{
+			"file_path": inputFile,
+			"uuid":      "msg-002",
+			"offset":    float64(2),
+		})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+
+		logs, ok := result.(*models.LogsAroundEntry)
+		require.True(t, ok)
+		assert.Equal(t, "test-session", logs.SessionID)
+		assert.Equal(t, "msg-002", logs.TargetUUID)
+		assert.Greater(t, len(logs.Entries), 0)
+	})
+
+	t.Run("uuid not found in file", func(t *testing.T) {
+		inputFile := createTestJSONLFile(t)
+		_, err := tool.Execute(map[string]interface{}{
+			"file_path": inputFile,
+			"uuid":      "nonexistent-uuid",
+		})
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
 }

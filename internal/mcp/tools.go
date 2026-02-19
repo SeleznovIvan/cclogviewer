@@ -192,7 +192,7 @@ func (t *GetSessionLogsTool) Name() string {
 }
 
 func (t *GetSessionLogsTool) Description() string {
-	return "Get full processed logs for a specific session"
+	return "Get full processed logs for a specific session. Accepts either a session_id or a direct file_path to a JSONL file."
 }
 
 func (t *GetSessionLogsTool) InputSchema() json.RawMessage {
@@ -201,11 +201,15 @@ func (t *GetSessionLogsTool) InputSchema() json.RawMessage {
 		"properties": {
 			"session_id": {
 				"type": "string",
-				"description": "Session UUID"
+				"description": "Session UUID (use this OR file_path)"
+			},
+			"file_path": {
+				"type": "string",
+				"description": "Direct path to a JSONL log file (use this OR session_id)"
 			},
 			"project": {
 				"type": "string",
-				"description": "Project name/path (optional if session_id is globally unique)"
+				"description": "Project name/path (optional, only used with session_id)"
 			},
 			"include_sidechains": {
 				"type": "boolean",
@@ -216,25 +220,30 @@ func (t *GetSessionLogsTool) InputSchema() json.RawMessage {
 				"type": "string",
 				"description": "File path to save the logs as JSON. If provided, creates parent directories automatically."
 			}
-		},
-		"required": ["session_id"]
+		}
 	}`)
 }
 
 func (t *GetSessionLogsTool) Execute(args map[string]interface{}) (interface{}, error) {
-	sessionID, _ := args["session_id"].(string)
-	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+	sessionID := getString(args, "session_id")
+	filePath := getString(args, "file_path")
+
+	if sessionID == "" && filePath == "" {
+		return nil, fmt.Errorf("either session_id or file_path is required")
 	}
 
-	project, _ := args["project"].(string)
+	includeSidechains := getBool(args, "include_sidechains", true)
 
-	includeSidechains := true
-	if b, ok := args["include_sidechains"].(bool); ok {
-		includeSidechains = b
+	var logs *models.SessionLogs
+	var err error
+
+	if filePath != "" {
+		logs, err = t.services.Session.GetSessionLogsFromFile(filePath, includeSidechains)
+	} else {
+		project := getString(args, "project")
+		logs, err = t.services.Session.GetSessionLogs(sessionID, project, includeSidechains)
 	}
 
-	logs, err := t.services.Session.GetSessionLogs(sessionID, project, includeSidechains)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session logs: %w", err)
 	}
@@ -559,7 +568,7 @@ func (t *GetSessionSummaryTool) Name() string {
 }
 
 func (t *GetSessionSummaryTool) Description() string {
-	return "Get a lightweight summary of a session including message counts, token usage, tool statistics, and error counts. Much smaller than full logs."
+	return "Get a lightweight summary of a session including message counts, token usage, tool statistics, and error counts. Accepts either a session_id or a direct file_path to a JSONL file."
 }
 
 func (t *GetSessionSummaryTool) InputSchema() json.RawMessage {
@@ -568,15 +577,19 @@ func (t *GetSessionSummaryTool) InputSchema() json.RawMessage {
 		"properties": {
 			"session_id": {
 				"type": "string",
-				"description": "Session UUID"
+				"description": "Session UUID (use this OR file_path)"
+			},
+			"file_path": {
+				"type": "string",
+				"description": "Direct path to a JSONL log file (use this OR session_id)"
 			},
 			"agent_id": {
 				"type": "string",
-				"description": "Specific subagent ID to analyze (optional, e.g., 'a909e0c')"
+				"description": "Specific subagent ID to analyze (optional, only used with session_id)"
 			},
 			"project": {
 				"type": "string",
-				"description": "Project name/path (optional)"
+				"description": "Project name/path (optional, only used with session_id)"
 			},
 			"include_sidechains": {
 				"type": "boolean",
@@ -587,22 +600,31 @@ func (t *GetSessionSummaryTool) InputSchema() json.RawMessage {
 				"type": "string",
 				"description": "File path to save the summary as JSON. If provided, creates parent directories automatically."
 			}
-		},
-		"required": ["session_id"]
+		}
 	}`)
 }
 
 func (t *GetSessionSummaryTool) Execute(args map[string]interface{}) (interface{}, error) {
 	sessionID := getString(args, "session_id")
-	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+	filePath := getString(args, "file_path")
+
+	if sessionID == "" && filePath == "" {
+		return nil, fmt.Errorf("either session_id or file_path is required")
 	}
 
-	agentID := getString(args, "agent_id")
-	project := getString(args, "project")
 	includeSidechains := getBool(args, "include_sidechains", true)
 
-	summary, err := t.services.Session.GetSessionSummary(sessionID, agentID, project, includeSidechains)
+	var summary *models.SessionSummary
+	var err error
+
+	if filePath != "" {
+		summary, err = t.services.Session.GetSessionSummaryFromFile(filePath, includeSidechains)
+	} else {
+		agentID := getString(args, "agent_id")
+		project := getString(args, "project")
+		summary, err = t.services.Session.GetSessionSummary(sessionID, agentID, project, includeSidechains)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session summary: %w", err)
 	}
@@ -634,7 +656,7 @@ func (t *GetToolUsageStatsTool) Name() string {
 }
 
 func (t *GetToolUsageStatsTool) Description() string {
-	return "Get tool usage statistics for a session including tool counts, success/failure rates, and usage patterns."
+	return "Get tool usage statistics for a session including tool counts, success/failure rates, and usage patterns. Accepts either a session_id or a direct file_path to a JSONL file."
 }
 
 func (t *GetToolUsageStatsTool) InputSchema() json.RawMessage {
@@ -643,15 +665,19 @@ func (t *GetToolUsageStatsTool) InputSchema() json.RawMessage {
 		"properties": {
 			"session_id": {
 				"type": "string",
-				"description": "Session UUID"
+				"description": "Session UUID (use this OR file_path)"
+			},
+			"file_path": {
+				"type": "string",
+				"description": "Direct path to a JSONL log file (use this OR session_id)"
 			},
 			"agent_id": {
 				"type": "string",
-				"description": "Specific subagent ID to analyze (optional)"
+				"description": "Specific subagent ID to analyze (optional, only used with session_id)"
 			},
 			"project": {
 				"type": "string",
-				"description": "Project name/path (optional)"
+				"description": "Project name/path (optional, only used with session_id)"
 			},
 			"include_sidechains": {
 				"type": "boolean",
@@ -662,22 +688,31 @@ func (t *GetToolUsageStatsTool) InputSchema() json.RawMessage {
 				"type": "string",
 				"description": "File path to save the stats as JSON. If provided, creates parent directories automatically."
 			}
-		},
-		"required": ["session_id"]
+		}
 	}`)
 }
 
 func (t *GetToolUsageStatsTool) Execute(args map[string]interface{}) (interface{}, error) {
 	sessionID := getString(args, "session_id")
-	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+	filePath := getString(args, "file_path")
+
+	if sessionID == "" && filePath == "" {
+		return nil, fmt.Errorf("either session_id or file_path is required")
 	}
 
-	agentID := getString(args, "agent_id")
-	project := getString(args, "project")
 	includeSidechains := getBool(args, "include_sidechains", true)
 
-	stats, err := t.services.Session.GetToolUsageStats(sessionID, agentID, project, includeSidechains)
+	var stats *models.ToolUsageStats
+	var err error
+
+	if filePath != "" {
+		stats, err = t.services.Session.GetToolUsageStatsFromFile(filePath, includeSidechains)
+	} else {
+		agentID := getString(args, "agent_id")
+		project := getString(args, "project")
+		stats, err = t.services.Session.GetToolUsageStats(sessionID, agentID, project, includeSidechains)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tool usage stats: %w", err)
 	}
@@ -709,7 +744,7 @@ func (t *GetSessionErrorsTool) Name() string {
 }
 
 func (t *GetSessionErrorsTool) Description() string {
-	return "Get errors and blockers found in a session for debugging and analysis."
+	return "Get errors and blockers found in a session for debugging and analysis. Accepts either a session_id or a direct file_path to a JSONL file."
 }
 
 func (t *GetSessionErrorsTool) InputSchema() json.RawMessage {
@@ -718,15 +753,19 @@ func (t *GetSessionErrorsTool) InputSchema() json.RawMessage {
 		"properties": {
 			"session_id": {
 				"type": "string",
-				"description": "Session UUID"
+				"description": "Session UUID (use this OR file_path)"
+			},
+			"file_path": {
+				"type": "string",
+				"description": "Direct path to a JSONL log file (use this OR session_id)"
 			},
 			"agent_id": {
 				"type": "string",
-				"description": "Specific subagent ID to analyze (optional)"
+				"description": "Specific subagent ID to analyze (optional, only used with session_id)"
 			},
 			"project": {
 				"type": "string",
-				"description": "Project name/path (optional)"
+				"description": "Project name/path (optional, only used with session_id)"
 			},
 			"include_sidechains": {
 				"type": "boolean",
@@ -742,26 +781,35 @@ func (t *GetSessionErrorsTool) InputSchema() json.RawMessage {
 				"type": "string",
 				"description": "File path to save the errors as JSON. If provided, creates parent directories automatically."
 			}
-		},
-		"required": ["session_id"]
+		}
 	}`)
 }
 
 func (t *GetSessionErrorsTool) Execute(args map[string]interface{}) (interface{}, error) {
 	sessionID := getString(args, "session_id")
-	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+	filePath := getString(args, "file_path")
+
+	if sessionID == "" && filePath == "" {
+		return nil, fmt.Errorf("either session_id or file_path is required")
 	}
 
-	agentID := getString(args, "agent_id")
-	project := getString(args, "project")
 	includeSidechains := getBool(args, "include_sidechains", true)
 	limit := getInt(args, "limit")
 	if limit == 0 {
 		limit = 20
 	}
 
-	errors, err := t.services.Session.GetSessionErrors(sessionID, agentID, project, includeSidechains, limit)
+	var errors *models.SessionErrors
+	var err error
+
+	if filePath != "" {
+		errors, err = t.services.Session.GetSessionErrorsFromFile(filePath, includeSidechains, limit)
+	} else {
+		agentID := getString(args, "agent_id")
+		project := getString(args, "project")
+		errors, err = t.services.Session.GetSessionErrors(sessionID, agentID, project, includeSidechains, limit)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session errors: %w", err)
 	}
@@ -793,7 +841,7 @@ func (t *GetSessionTimelineTool) Name() string {
 }
 
 func (t *GetSessionTimelineTool) Description() string {
-	return "Get a condensed timeline of session events without full content. Shows step-by-step progression."
+	return "Get a condensed timeline of session events without full content. Shows step-by-step progression. Accepts either a session_id or a direct file_path to a JSONL file."
 }
 
 func (t *GetSessionTimelineTool) InputSchema() json.RawMessage {
@@ -802,15 +850,19 @@ func (t *GetSessionTimelineTool) InputSchema() json.RawMessage {
 		"properties": {
 			"session_id": {
 				"type": "string",
-				"description": "Session UUID"
+				"description": "Session UUID (use this OR file_path)"
+			},
+			"file_path": {
+				"type": "string",
+				"description": "Direct path to a JSONL log file (use this OR session_id)"
 			},
 			"agent_id": {
 				"type": "string",
-				"description": "Specific subagent ID to analyze (optional)"
+				"description": "Specific subagent ID to analyze (optional, only used with session_id)"
 			},
 			"project": {
 				"type": "string",
-				"description": "Project name/path (optional)"
+				"description": "Project name/path (optional, only used with session_id)"
 			},
 			"include_sidechains": {
 				"type": "boolean",
@@ -826,26 +878,35 @@ func (t *GetSessionTimelineTool) InputSchema() json.RawMessage {
 				"type": "string",
 				"description": "File path to save the timeline as JSON. If provided, creates parent directories automatically."
 			}
-		},
-		"required": ["session_id"]
+		}
 	}`)
 }
 
 func (t *GetSessionTimelineTool) Execute(args map[string]interface{}) (interface{}, error) {
 	sessionID := getString(args, "session_id")
-	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+	filePath := getString(args, "file_path")
+
+	if sessionID == "" && filePath == "" {
+		return nil, fmt.Errorf("either session_id or file_path is required")
 	}
 
-	agentID := getString(args, "agent_id")
-	project := getString(args, "project")
 	includeSidechains := getBool(args, "include_sidechains", true)
 	limit := getInt(args, "limit")
 	if limit == 0 {
 		limit = 100
 	}
 
-	timeline, err := t.services.Session.GetSessionTimeline(sessionID, agentID, project, includeSidechains, limit)
+	var timeline *models.SessionTimeline
+	var err error
+
+	if filePath != "" {
+		timeline, err = t.services.Session.GetSessionTimelineFromFile(filePath, includeSidechains, limit)
+	} else {
+		agentID := getString(args, "agent_id")
+		project := getString(args, "project")
+		timeline, err = t.services.Session.GetSessionTimeline(sessionID, agentID, project, includeSidechains, limit)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session timeline: %w", err)
 	}
@@ -877,7 +938,7 @@ func (t *GetSessionStatsTool) Name() string {
 }
 
 func (t *GetSessionStatsTool) Description() string {
-	return "Get comprehensive session statistics combining summary, tool usage, and errors. Optionally generates HTML visualization."
+	return "Get comprehensive session statistics combining summary, tool usage, and errors. Optionally generates HTML visualization. Accepts either a session_id or a direct file_path to a JSONL file."
 }
 
 func (t *GetSessionStatsTool) InputSchema() json.RawMessage {
@@ -886,15 +947,19 @@ func (t *GetSessionStatsTool) InputSchema() json.RawMessage {
 		"properties": {
 			"session_id": {
 				"type": "string",
-				"description": "Session UUID"
+				"description": "Session UUID (use this OR file_path)"
+			},
+			"file_path": {
+				"type": "string",
+				"description": "Direct path to a JSONL log file (use this OR session_id)"
 			},
 			"agent_id": {
 				"type": "string",
-				"description": "Specific subagent ID to analyze (optional)"
+				"description": "Specific subagent ID to analyze (optional, only used with session_id)"
 			},
 			"project": {
 				"type": "string",
-				"description": "Project name/path (optional)"
+				"description": "Project name/path (optional, only used with session_id)"
 			},
 			"include_sidechains": {
 				"type": "boolean",
@@ -920,26 +985,35 @@ func (t *GetSessionStatsTool) InputSchema() json.RawMessage {
 				"description": "Open HTML in browser (requires generate_html=true)",
 				"default": false
 			}
-		},
-		"required": ["session_id"]
+		}
 	}`)
 }
 
 func (t *GetSessionStatsTool) Execute(args map[string]interface{}) (interface{}, error) {
 	sessionID := getString(args, "session_id")
-	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+	filePath := getString(args, "file_path")
+
+	if sessionID == "" && filePath == "" {
+		return nil, fmt.Errorf("either session_id or file_path is required")
 	}
 
-	agentID := getString(args, "agent_id")
-	project := getString(args, "project")
 	includeSidechains := getBool(args, "include_sidechains", true)
 	errorsLimit := getInt(args, "errors_limit")
 	if errorsLimit == 0 {
 		errorsLimit = 10
 	}
 
-	stats, err := t.services.Session.GetSessionStats(sessionID, agentID, project, includeSidechains, errorsLimit)
+	var stats *models.SessionStats
+	var err error
+
+	if filePath != "" {
+		stats, err = t.services.Session.GetSessionStatsFromFile(filePath, includeSidechains, errorsLimit)
+	} else {
+		agentID := getString(args, "agent_id")
+		project := getString(args, "project")
+		stats, err = t.services.Session.GetSessionStats(sessionID, agentID, project, includeSidechains, errorsLimit)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session stats: %w", err)
 	}
@@ -1183,7 +1257,7 @@ func (t *GetLogsAroundEntryTool) Name() string {
 }
 
 func (t *GetLogsAroundEntryTool) Description() string {
-	return "Get logs around a specific entry identified by UUID. Use negative offset for entries BEFORE (e.g., -3 for 3 prior entries + target), positive offset for entries AFTER (e.g., +3 for target + 3 following entries)."
+	return "Get logs around a specific entry identified by UUID. Use negative offset for entries BEFORE (e.g., -3 for 3 prior entries + target), positive offset for entries AFTER (e.g., +3 for target + 3 following entries). Accepts either a session_id or a direct file_path to a JSONL file."
 }
 
 func (t *GetLogsAroundEntryTool) InputSchema() json.RawMessage {
@@ -1192,7 +1266,11 @@ func (t *GetLogsAroundEntryTool) InputSchema() json.RawMessage {
 		"properties": {
 			"session_id": {
 				"type": "string",
-				"description": "Session UUID"
+				"description": "Session UUID (use this OR file_path)"
+			},
+			"file_path": {
+				"type": "string",
+				"description": "Direct path to a JSONL log file (use this OR session_id)"
 			},
 			"uuid": {
 				"type": "string",
@@ -1200,7 +1278,7 @@ func (t *GetLogsAroundEntryTool) InputSchema() json.RawMessage {
 			},
 			"project": {
 				"type": "string",
-				"description": "Project name/path (optional)"
+				"description": "Project name/path (optional, only used with session_id)"
 			},
 			"offset": {
 				"type": "integer",
@@ -1216,14 +1294,16 @@ func (t *GetLogsAroundEntryTool) InputSchema() json.RawMessage {
 				"description": "File path to save the logs as JSON. If provided, creates parent directories automatically."
 			}
 		},
-		"required": ["session_id", "uuid"]
+		"required": ["uuid"]
 	}`)
 }
 
 func (t *GetLogsAroundEntryTool) Execute(args map[string]interface{}) (interface{}, error) {
 	sessionID := getString(args, "session_id")
-	if sessionID == "" {
-		return nil, fmt.Errorf("session_id is required")
+	filePath := getString(args, "file_path")
+
+	if sessionID == "" && filePath == "" {
+		return nil, fmt.Errorf("either session_id or file_path is required")
 	}
 
 	targetUUID := getString(args, "uuid")
@@ -1231,14 +1311,22 @@ func (t *GetLogsAroundEntryTool) Execute(args map[string]interface{}) (interface
 		return nil, fmt.Errorf("uuid is required")
 	}
 
-	project := getString(args, "project")
 	offset := getInt(args, "offset")
 	if offset == 0 {
 		offset = 3
 	}
 	includeSidechains := getBool(args, "include_sidechains", true)
 
-	logs, err := t.services.Session.GetLogsAroundEntry(sessionID, targetUUID, project, offset, includeSidechains)
+	var logs *models.LogsAroundEntry
+	var err error
+
+	if filePath != "" {
+		logs, err = t.services.Session.GetLogsAroundEntryFromFile(filePath, targetUUID, offset, includeSidechains)
+	} else {
+		project := getString(args, "project")
+		logs, err = t.services.Session.GetLogsAroundEntry(sessionID, targetUUID, project, offset, includeSidechains)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get logs around entry: %w", err)
 	}

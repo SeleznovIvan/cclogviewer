@@ -1266,3 +1266,215 @@ func (s *SessionService) GetLogsAroundEntry(sessionID, targetUUID, projectName s
 
 	return result, nil
 }
+
+// fileLabel returns a short label derived from the file path for use in response models.
+func fileLabel(filePath string) string {
+	base := filepath.Base(filePath)
+	return strings.TrimSuffix(base, filepath.Ext(base))
+}
+
+// loadProcessedEntriesFromFile loads and processes entries directly from a JSONL file path.
+func (s *SessionService) loadProcessedEntriesFromFile(filePath string, includeSidechains bool) ([]*models.ProcessedEntry, error) {
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("file not found: %s", filePath)
+	}
+
+	entries, err := parser.ReadJSONLFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	processed := processor.ProcessEntries(entries)
+
+	if !includeSidechains {
+		var filtered []*models.ProcessedEntry
+		for _, e := range processed {
+			if !e.IsSidechain {
+				filtered = append(filtered, e)
+			}
+		}
+		processed = filtered
+	}
+
+	return processed, nil
+}
+
+// GetSessionLogsFromFile retrieves full processed logs from a JSONL file path.
+func (s *SessionService) GetSessionLogsFromFile(filePath string, includeSidechains bool) (*models.SessionLogs, error) {
+	entries, err := parser.ReadJSONLFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+
+	processed := processor.ProcessEntries(entries)
+
+	label := fileLabel(filePath)
+	logs := &models.SessionLogs{
+		SessionID: label,
+		Project:   filePath,
+		Entries:   make([]models.SessionLogEntry, 0),
+	}
+
+	var totalInput, totalOutput, cacheRead, cacheCreation int
+
+	for _, entry := range processed {
+		if !includeSidechains && entry.IsSidechain {
+			continue
+		}
+
+		logEntry := models.SessionLogEntry{
+			UUID:        entry.UUID,
+			Timestamp:   entry.Timestamp,
+			Role:        entry.Role,
+			Content:     entry.Content,
+			IsSidechain: entry.IsSidechain,
+			AgentID:     entry.AgentID,
+		}
+
+		for _, tc := range entry.ToolCalls {
+			logEntry.ToolCalls = append(logEntry.ToolCalls, models.SessionToolCall{
+				Name:  tc.Name,
+				Input: tc.RawInput,
+			})
+		}
+
+		logs.Entries = append(logs.Entries, logEntry)
+
+		totalInput += entry.InputTokens
+		totalOutput += entry.OutputTokens
+		cacheRead += entry.CacheReadTokens
+		cacheCreation += entry.CacheCreationTokens
+	}
+
+	logs.TokenStats = &models.SessionTokenStats{
+		TotalInput:    totalInput,
+		TotalOutput:   totalOutput,
+		CacheRead:     cacheRead,
+		CacheCreation: cacheCreation,
+	}
+
+	return logs, nil
+}
+
+// GetSessionSummaryFromFile returns a lightweight summary from a JSONL file path.
+func (s *SessionService) GetSessionSummaryFromFile(filePath string, includeSidechains bool) (*models.SessionSummary, error) {
+	processed, err := s.loadProcessedEntriesFromFile(filePath, includeSidechains)
+	if err != nil {
+		return nil, err
+	}
+
+	label := fileLabel(filePath)
+	return s.computeSummary(label, "", filePath, processed), nil
+}
+
+// GetToolUsageStatsFromFile returns tool usage statistics from a JSONL file path.
+func (s *SessionService) GetToolUsageStatsFromFile(filePath string, includeSidechains bool) (*models.ToolUsageStats, error) {
+	processed, err := s.loadProcessedEntriesFromFile(filePath, includeSidechains)
+	if err != nil {
+		return nil, err
+	}
+
+	label := fileLabel(filePath)
+	return s.computeToolStats(label, "", processed), nil
+}
+
+// GetSessionErrorsFromFile returns errors found in a JSONL file.
+func (s *SessionService) GetSessionErrorsFromFile(filePath string, includeSidechains bool, limit int) (*models.SessionErrors, error) {
+	processed, err := s.loadProcessedEntriesFromFile(filePath, includeSidechains)
+	if err != nil {
+		return nil, err
+	}
+
+	label := fileLabel(filePath)
+	return s.computeErrors(label, "", processed, limit), nil
+}
+
+// GetSessionTimelineFromFile returns a condensed timeline from a JSONL file.
+func (s *SessionService) GetSessionTimelineFromFile(filePath string, includeSidechains bool, limit int) (*models.SessionTimeline, error) {
+	processed, err := s.loadProcessedEntriesFromFile(filePath, includeSidechains)
+	if err != nil {
+		return nil, err
+	}
+
+	label := fileLabel(filePath)
+	return s.computeTimeline(label, "", processed, limit), nil
+}
+
+// GetSessionStatsFromFile returns aggregated statistics from a JSONL file.
+func (s *SessionService) GetSessionStatsFromFile(filePath string, includeSidechains bool, errorsLimit int) (*models.SessionStats, error) {
+	processed, err := s.loadProcessedEntriesFromFile(filePath, includeSidechains)
+	if err != nil {
+		return nil, err
+	}
+
+	label := fileLabel(filePath)
+	stats := &models.SessionStats{
+		SessionID:   label,
+		Project:     filePath,
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	stats.Summary = s.computeSummary(label, "", filePath, processed)
+	stats.ToolStats = s.computeToolStats(label, "", processed)
+	stats.Errors = s.computeErrors(label, "", processed, errorsLimit)
+
+	return stats, nil
+}
+
+// GetLogsAroundEntryFromFile returns logs around a specific entry from a JSONL file.
+func (s *SessionService) GetLogsAroundEntryFromFile(filePath, targetUUID string, offset int, includeSidechains bool) (*models.LogsAroundEntry, error) {
+	processed, err := s.loadProcessedEntriesFromFile(filePath, includeSidechains)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find the target entry by UUID
+	targetIndex := -1
+	for i, e := range processed {
+		if e.UUID == targetUUID {
+			targetIndex = i
+			break
+		}
+	}
+
+	if targetIndex == -1 {
+		return nil, fmt.Errorf("entry with UUID %s not found", targetUUID)
+	}
+
+	if offset == 0 {
+		offset = -3
+	}
+
+	label := fileLabel(filePath)
+	result := &models.LogsAroundEntry{
+		SessionID:   label,
+		Project:     filePath,
+		TargetUUID:  targetUUID,
+		TargetIndex: targetIndex,
+		Offset:      offset,
+		TotalCount:  len(processed),
+	}
+
+	if offset < 0 {
+		absOffset := -offset
+		for i := -absOffset; i < 0; i++ {
+			idx := targetIndex + i
+			if idx < 0 {
+				continue
+			}
+			result.Entries = append(result.Entries, s.entryToContextLog(processed[idx], i))
+		}
+		result.Entries = append(result.Entries, s.entryToContextLog(processed[targetIndex], 0))
+	} else {
+		result.Entries = append(result.Entries, s.entryToContextLog(processed[targetIndex], 0))
+		for i := 1; i <= offset; i++ {
+			idx := targetIndex + i
+			if idx >= len(processed) {
+				break
+			}
+			result.Entries = append(result.Entries, s.entryToContextLog(processed[idx], i))
+		}
+	}
+
+	return result, nil
+}

@@ -477,6 +477,33 @@ cclogviewer/
 │   └── renderer/             # HTML generation
 ```
 
+### Processing Pipeline
+
+Both the CLI viewer and MCP server share the same processing pipeline. Raw JSONL lines are parsed into log entries, then transformed into a hierarchical structure with matched tool calls, grouped subagent conversations, and aggregated token metrics.
+
+```mermaid
+flowchart TD
+    A["JSONL Session File"] --> B["Parser"]
+    S["Subagent Files\n(agent-*.jsonl)"] --> B
+
+    B -->|"[]LogEntry\n(flat, chronological)"| C["Processor"]
+
+    C --> C1["Parse messages\n& extract roles"]
+    C1 --> C2["Match tool calls\nwith results"]
+    C2 --> C3["Group sidechain\n(Task) conversations"]
+    C3 --> C4["Aggregate tokens\n& flag errors"]
+
+    C4 -->|"[]*ProcessedEntry\n(hierarchical)"| D{Output}
+
+    D --> E["HTML Viewer\n(interactive report)"]
+    D --> F["MCP Server\n(JSON responses)"]
+
+    style A fill:#f9f,stroke:#333
+    style S fill:#f9f,stroke:#333
+    style E fill:#bbf,stroke:#333
+    style F fill:#bbf,stroke:#333
+```
+
 ### Log Storage
 
 Claude Code stores session logs in `~/.claude/projects/`:
